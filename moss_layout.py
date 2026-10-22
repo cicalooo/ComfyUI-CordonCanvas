@@ -125,52 +125,52 @@ def _items(boxes: list, palettes: list, width: int, height: int):
         yield item, (min(y0, y1), min(x0, x1), max(y0, y1), max(x0, x1))
 
 
-# Preset name -> summary.meta tags and a prompt sentence baked into the caption.
-# The caption widget is not rewritten. summary.meta is an official optional
-# "array of medium/genre tags" (OpenMOSS/MOSS-Image skills/.../references/layout.md);
-# no fixed vocabulary is published, so tags follow the official examples' style
-# (["poster"], ["product campaign", "studio photography"]): 1-2 short lowercase
-# medium/genre phrases. Sentences are positive-only (also fine for Flux.2 / Krea 2).
+# Preset name -> summary.meta tags, a medium PREFIX that leads the caption and a short
+# reinforcing SUFFIX with concrete visible medium cues. Evidence (OpenMOSS/MOSS-Image):
+# training captions open with framing + medium ("A top-down flat lay of a watercolor
+# painting ...", paper Fig. 2) and the recaptioner describes "artistic style" as visible
+# content; summary.meta is an "array of medium/genre tags" kept ~90% of the time in
+# training. Positive-only wording; the caption widget itself is never rewritten.
 STYLE_PRESETS = {
-    "photoreal": {"meta": ["photograph"],
-                  "prompt": "A photorealistic photograph with natural lighting, true-to-life colors and fine surface detail."},
-    "studio product": {"meta": ["product campaign", "studio photography"],
-                       "prompt": "Shot in a studio with soft side lighting, a clean backdrop and tactile material detail."},
-    "editorial": {"meta": ["editorial photography"],
-                  "prompt": "An editorial magazine photograph with deliberate composition and polished, even lighting."},
-    "analog film": {"meta": ["film photography"],
-                    "prompt": "Shot on 35mm color film with visible grain, soft highlight roll-off and warm tones."},
-    "cinematic still": {"meta": ["film still"],
-                        "prompt": "A widescreen cinematic film still with motivated lighting, shallow depth of field and a graded palette."},
-    "illustration": {"meta": ["illustration"],
-                     "prompt": "A flat vector illustration with clean shapes, limited palette and crisp edges."},
-    "anime": {"meta": ["anime"],
-              "prompt": "An anime-style illustration with clean line art, cel shading and vivid colors."},
-    "oil painting": {"meta": ["oil painting"],
-                     "prompt": "An oil painting with visible brushstrokes, rich layered color and canvas texture."},
-    "watercolor": {"meta": ["watercolor"],
-                   "prompt": "A watercolor painting with soft washes, translucent layers and paper texture."},
-    "3d render": {"meta": ["3d render"],
-                  "prompt": "A 3D render with physically based materials, soft global illumination and clean geometry."},
-    "pixel art": {"meta": ["pixel art"],
-                  "prompt": "Pixel art with a limited palette, crisp square pixels and no anti-aliasing."},
-    "poster": {"meta": ["poster"],
-               "prompt": "A graphic poster design with clear typographic hierarchy and bold composition."},
+    "photo": {
+        "meta": ["photograph"],
+        "prefix": "A real-world photograph captured with a camera.",
+        "prompt": "Natural light, lens depth of field, fine sensor grain and real-world textures with small imperfections.",
+    },
+    "3d render": {
+        "meta": ["3d render"],
+        "prefix": "A 3D CGI render.",
+        "prompt": "Physically based materials, ray-traced lighting and soft shadows, clean modeled geometry and subtle subsurface scattering.",
+    },
+    "2d art": {
+        "meta": ["illustration"],
+        "prefix": "A 2D digital illustration.",
+        "prompt": "Hand-drawn linework, flat or cel shading, a limited color palette and a flat, graphic look.",
+    },
 }
 STYLE_PRESET_NAMES = ["none", *STYLE_PRESETS]
-# Old saved workflow values -> current preset names.
+# Every earlier preset name -> nearest current preset, so old workflows still validate.
 LEGACY_PRESET_ALIASES = {
-    "unreal cinematic": "3d render",
-    "cgi render": "3d render",
-    "cgi": "3d render",
-    "unreal": "3d render",
-    "analog photo": "analog film",
-    "cinematic": "cinematic still",
-    "photograph": "photoreal",
+    "photoreal": "photo", "photograph": "photo", "studio product": "photo", "editorial": "photo",
+    "analog film": "photo", "analog photo": "photo", "cinematic still": "photo", "cinematic": "photo",
+    "3d": "3d render", "unreal cinematic": "3d render", "unreal": "3d render", "cgi render": "3d render", "cgi": "3d render",
+    "illustration": "2d art", "anime": "2d art", "oil painting": "2d art", "watercolor": "2d art",
+    "pixel art": "2d art", "poster": "2d art",
 }
-# Accepted by the combo so old workflows still validate; not shown as new choices in the dock.
 STYLE_PRESET_OPTIONS = STYLE_PRESET_NAMES + [k for k in LEGACY_PRESET_ALIASES if k not in STYLE_PRESETS]
 CANVAS_MODES = ["single", "multi_panel", "collage"]
+# photo-only camera/focus phrase; when set, the photo suffix drops its depth-of-field clause.
+PHOTO_FOCUS = {
+    "none": "",
+    "shallow depth of field": "Shot at f/1.8, shallow depth of field, soft creamy bokeh background.",
+    "full focus": "Shot at f/11, deep depth of field, everything in sharp focus front to back.",
+    "moderate": "Shot at f/5.6, subject sharp, background slightly soft.",
+    "wide-angle": "24mm wide-angle lens, deep focus, environment sharp.",
+    "telephoto": "200mm telephoto lens, compressed perspective, blurred background.",
+    "macro": "Macro lens close-up, razor-thin focus plane.",
+}
+PHOTO_FOCUS_NAMES = list(PHOTO_FOCUS)
+PHOTO_SUFFIX_NO_DOF = "Natural light, fine sensor grain and real-world textures with small imperfections."
 
 
 def resolve_preset(preset: str) -> str:
@@ -182,10 +182,11 @@ def style_tags(style: str) -> list:
     return [m.strip() for m in re.split(r"[,\n]", style or "") if m.strip()]
 
 
-def bake_style(caption: str, style: str = "", preset: str = "none"):
+def bake_style(caption: str, style: str = "", preset: str = "none", focus: str = "none"):
     """Return (caption, style_csv) with a preset applied for both empty and boxed outputs.
 
-    The preset sentence is appended to the caption (plain-text path and summary.caption).
+    The preset's medium prefix leads the caption and its cue sentence is appended
+    (plain-text path and summary.caption); idempotent on already-baked text.
     Preset meta tags lead summary.meta; extra style tags (legacy callers only, the
     widget was removed) fill the remaining slots (max 4).
     """
@@ -202,9 +203,18 @@ def bake_style(caption: str, style: str = "", preset: str = "none"):
             seen.add(key)
             merged.append(tag)
         tags = merged[:4]
-        prompt = spec["prompt"].strip()
-        if prompt and prompt.lower() not in cap.lower():
-            cap = f"{cap}\n{prompt}".strip() if cap else prompt
+        prefix = spec.get("prefix", "").strip()
+        suffix = spec.get("prompt", "").strip()
+        focus_phrase = PHOTO_FOCUS.get(focus or "none", "") if resolve_preset(preset) == "photo" else ""
+        if focus_phrase:
+            suffix = f"{PHOTO_SUFFIX_NO_DOF} {focus_phrase}"
+        if prefix and not cap.lower().startswith(prefix.lower()):
+            body = cap[:1].upper() + cap[1:] if cap else ""
+            cap = f"{prefix} {body}".strip()
+        if suffix and suffix.lower() not in cap.lower():
+            if cap and cap[-1] not in ".!?\"'":
+                cap += "."
+            cap = f"{cap} {suffix}".strip()
     return cap, ", ".join(tags)
 
 
@@ -218,12 +228,12 @@ def _summary(caption: str, style: str, canvas: str = "single") -> dict:
     return s
 
 
-def build_native(boxes, palettes, width, height, caption="", style="", preset="none", canvas="single") -> str:
+def build_native(boxes, palettes, width, height, caption="", style="", preset="none", canvas="single", focus="none") -> str:
     """MOSS native abs_centralized JSON straight from the pixel boxes (no 0-1000 quantisation).
     Edges enclose the box like the stock MOSS-Image Layout Prompt node.
     No boxes: the caption is passed through as plain text so the encoder still has a prompt.
     A style preset is baked into that text and, when boxes exist, into summary.caption and summary.meta."""
-    caption, style = bake_style(caption, style, preset)
+    caption, style = bake_style(caption, style, preset, focus)
     items = []
     hw, hh = width // 2, height // 2
     for item, (fy0, fx0, fy1, fx1) in _items(boxes, palettes, width, height):
@@ -241,9 +251,9 @@ def build_native(boxes, palettes, width, height, caption="", style="", preset="n
     return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
 
 
-def build_relative(boxes, palettes, width, height, caption="", style="", preset="none", canvas="single") -> str:
+def build_relative(boxes, palettes, width, height, caption="", style="", preset="none", canvas="single", focus="none") -> str:
     """Portable relative_1000 layout: feed it back into any canvas's bboxes input at any resolution."""
-    caption, style = bake_style(caption, style, preset)
+    caption, style = bake_style(caption, style, preset, focus)
     items = []
     for item, frac in _items(boxes, palettes, width, height):
         item["bbox"] = [max(0, min(1000, round(v * 1000))) for v in frac]

@@ -20,7 +20,7 @@ from comfy_extras.nodes_bounding_boxes import (
 )
 
 from .latent import DOWNSCALE, target_size
-from .moss_layout import STYLE_PRESET_OPTIONS, CANVAS_MODES, find_layout, layout_to_boxes, build_native, build_relative
+from .moss_layout import STYLE_PRESET_OPTIONS, CANVAS_MODES, PHOTO_FOCUS_NAMES, find_layout, layout_to_boxes, build_native, build_relative
 
 WEB_DIRECTORY = "./web"
 
@@ -153,12 +153,18 @@ class CordonCanvas(io.ComfyNode):
                 io.String.Input("caption", multiline=True, default="", optional=True,
                                 tooltip="Whole-image description for moss_layout (summary.caption). "
                                         "A connected string overrides the widget."),
-                io.Combo.Input("style_preset", options=STYLE_PRESET_OPTIONS, default="photoreal",
-                               tooltip="Bakes a style sentence into the prompt for both an empty canvas and boxed layouts, "
+                io.Combo.Input("style_preset", options=STYLE_PRESET_OPTIONS, default="photo",
+                               tooltip="Leads the prompt with a medium statement and appends medium cues for both an empty canvas and boxed layouts, "
                                        "without changing the caption widget. Boxed layouts also get the preset's summary.meta tags. "
                                        "Edited in the dock. Legacy names map to current presets."),
                 io.Combo.Input("canvas", options=CANVAS_MODES, default="single", optional=True,
                                tooltip="summary.canvas of the layout: single, multi_panel or collage. Edited in the dock."),
+                io.Combo.Input("photo_focus", options=PHOTO_FOCUS_NAMES, default="none", optional=True,
+                               tooltip="Camera/focus phrase for the photo preset (ignored for other presets). Edited in the dock."),
+                io.Boolean.Input("bypass_boxes", default=False, optional=True,
+                                 tooltip="Bypass boxes: caption-only prompt. moss_layout/layout_1000 become the caption plus "
+                                         "the style sentence; bboxes/elements/character_boxes/preview are empty. "
+                                         "Editor boxes are kept. Toggled in the dock."),
             ],
             outputs=[
                 io.Image.Output(display_name="preview"),
@@ -181,7 +187,7 @@ class CordonCanvas(io.ComfyNode):
 
     @classmethod
     def execute(cls, width, height, box_data="[]", last_incoming="", background=None, bboxes=None,
-                batch_size=1, latent_type=None, caption=None, style_preset="none", canvas="single") -> io.NodeOutput:
+                batch_size=1, latent_type=None, caption=None, style_preset="none", canvas="single", bypass_boxes=False, photo_focus="none") -> io.NodeOutput:
         layout = find_layout(bboxes) if isinstance(bboxes, (str, dict)) else None
         incoming = layout_to_boxes(layout, width, height) if layout is not None else boxes_from_input(bboxes, width, height)
         applied = _parse_boxes(last_incoming)
@@ -189,6 +195,8 @@ class CordonCanvas(io.ComfyNode):
         upstream_changed = bool(incoming) and incoming_norm != applied
         source = incoming if upstream_changed else _parse_boxes(box_data)
         from_editor = not upstream_changed
+        if bypass_boxes:
+            source = []  # caption-only: same as the no-boxes path; editor box_data is untouched
         regions = boxes_to_regions(source, width, height)
         preview_regions = []
         for box, region in zip([b for b in source if isinstance(b, dict)], regions):
@@ -222,8 +230,10 @@ class CordonCanvas(io.ComfyNode):
         )
         dict_boxes = [b for b in source if isinstance(b, dict)]
         palettes = [r["palette"] for r in regions]
-        moss_native = build_native(dict_boxes, palettes, width, height, caption or "", "", style_preset or "none", canvas or "single")
-        layout_1000 = build_relative(dict_boxes, palettes, width, height, caption or "", "", style_preset or "none", canvas or "single")
+        moss_native = build_native(dict_boxes, palettes, width, height, caption or "", "", style_preset or "none", canvas or "single", photo_focus or "none")
+        layout_1000 = build_relative(dict_boxes, palettes, width, height, caption or "", "", style_preset or "none", canvas or "single", photo_focus or "none")
+        if bypass_boxes:
+            layout_1000 = moss_native  # caption-only plain text on both prompt outputs
         return io.NodeOutput(preview, fractions_to_bbox_frame(regions, width, height),
                              build_elements(regions), latent_out, character_boxes,
                              moss_native, layout_1000, ui=ui)

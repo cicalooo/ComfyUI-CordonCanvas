@@ -265,8 +265,8 @@ function setupNode(node) {
   hideWidget(dataW); hideWidget(lastW);
   // batch/latent/preset live in the dock (keeps the node body small); hidden on the node itself.
   // caption lives on the node itself (multiline widget / linkable input) — not duplicated in the dock.
-  const batchW = W("batch_size"), latentW = W("latent_type"), presetW = W("style_preset"), canvasW = W("canvas");
-  for (const w of [batchW, latentW, presetW, canvasW]) hideWidget(w);
+  const batchW = W("batch_size"), latentW = W("latent_type"), presetW = W("style_preset"), canvasW = W("canvas"), bypassW = W("bypass_boxes"), focusW = W("photo_focus");
+  for (const w of [batchW, latentW, presetW, canvasW, bypassW, focusW]) hideWidget(w);
 
   let boxes = migrateBoxes(parse(dataW?.value));
   let sel = -1, drag = null, bgImg = null, upInfo = null; // upInfo: {url, entry, state} from the upstream chain
@@ -312,6 +312,19 @@ function setupNode(node) {
   node.properties.cdc_overlay ??= true;
   node.properties.cdc_opacity ??= 0.65;
   node.properties.cdc_follow ??= "auto"; // "auto" | "off" | downstream node id (number)
+  // bypass boxes: hidden BOOLEAN widget "bypass_boxes"; prompt outputs become caption-only, boxes stay
+  const bypassOn = () => !!curBypassW()?.value;
+  const bypassBtn = btn("⊘ boxes", () => {
+    const bw = curBypassW(); if (!bw || linkedInput("bypass_boxes")) return;
+    bw.value = !bw.value; bw.callback?.(bw.value); node.setDirtyCanvas?.(true, true);
+    syncBypassBtn(); syncPanel(); draw();
+  }, "Bypass boxes: caption-only prompt");
+  const syncBypassBtn = () => {
+    const linked = !!linkedInput("bypass_boxes"), on = bypassOn();
+    bypassBtn.classList.toggle("active", on);
+    bypassBtn.disabled = linked || !curBypassW();
+    bypassBtn.title = "Bypass boxes: caption-only prompt — " + (linked ? "set by linked input" : on ? "ON (click to use boxes)" : "off");
+  };
   const ovBtn = btn("👁", () => { node.properties.cdc_overlay = !node.properties.cdc_overlay; syncOvBtn(); draw(); }, "Show background image");
   const syncOvBtn = () => ovBtn.classList.toggle("active", !!node.properties.cdc_overlay);
   const ovSl = el("input", { type: "range", min: 0, max: 1, step: 0.05, value: node.properties.cdc_opacity, title: "Background opacity" }, { width: "48px" });
@@ -358,7 +371,7 @@ function setupNode(node) {
              btn("⌫", () => removeSel(), "Delete selected box"),
              btn("▲", () => reorder(1), "Move box forward (drawn later, on top)"),
              btn("▼", () => reorder(-1), "Move box backward (drawn earlier, below)"),
-             ovBtn, ovSl, followBtn);
+             ovBtn, ovSl, followBtn, bypassBtn);
   syncOvBtn();
   let flashTimer = null;
   const HINT_OPS = "drag: new/move/resize · Shift/Ctrl+drag: new box over others · Alt+click: cycle overlapping · Del/right-click: remove · Esc: deselect · wheel: zoom · middle/Space+drag: pan · dbl-click empty: fit · Ctrl+wheel: graph zoom";
@@ -372,6 +385,7 @@ function setupNode(node) {
     return `${dw}×${dh}${srcs.length ? ` (${srcs.join("/")})` : ""} · ${boxes.length} box${boxes.length === 1 ? "" : "es"}` + (sel >= 0 ? ` · #${sel + 1}` : "")
       + (() => { const c = boxes.map((b, i) => (b.metadata?.character && b.metadata?.type !== "text" ? i + 1 : 0)).filter(Boolean); return c.length ? ` · ★ ${c.join(", ")}` : ""; })()
       + frameWarn
+      + (bypassOn() ? " · ⊘ boxes bypassed: caption-only prompt" : "")
       + ` · ${HINT_OPS}`;
   };
   const hint = el("div", { textContent: HINT_OPS },
@@ -427,7 +441,9 @@ function setupNode(node) {
   batchLatRow.append(batchIn, latentSel);
   const canvasSel = el("select", { title: "summary.canvas: single, multi_panel or collage" }, inStyle);
   const presetLab = lab("preset"), canvasLab = lab("canvas"), batchLatLab = lab("batch·lat");
-  genDiv.append(presetLab, presetSel, canvasLab, canvasSel, batchLatLab, batchLatRow);
+  const focusSel = el("select", { title: "Camera/focus for the photo preset (ignored for other presets)" }, inStyle);
+  const focusLab = lab("focus");
+  genDiv.append(presetLab, presetSel, focusLab, focusSel, canvasLab, canvasSel, batchLatLab, batchLatRow);
   root.append(bar, hint, wrap, panel, genDiv);
 
   const fillSel = (sel, opts, cur) => {
@@ -441,11 +457,17 @@ function setupNode(node) {
   function syncGen() {
     const pw = curPresetW(), lw = curLatentW(), bw = curBatchW();
     // legacy preset names stay valid on the widget but are only listed when currently selected
-    const legacy = new Set(["unreal cinematic", "cgi render", "cgi", "unreal", "analog photo", "cinematic", "photograph"]);
-    fillSel(presetSel, comboOpts(pw).filter((v) => !legacy.has(v) || v === pw?.value), pw?.value);
+    const current = new Set(["none", "photo", "3d render", "2d art"]);
+    fillSel(presetSel, comboOpts(pw).filter((v) => current.has(v) || v === pw?.value), pw?.value);
     const cw = curCanvasW();
     fillSel(canvasSel, comboOpts(cw).length ? comboOpts(cw) : ["single", "multi_panel", "collage"], cw?.value ?? "single");
     canvasSel.disabled = !cw || !!linkedInput("canvas");
+    const fw = curFocusW();
+    fillSel(focusSel, comboOpts(fw), fw?.value ?? "none");
+    const isPhoto = ["photo", "photoreal", "photograph", "studio product", "editorial", "analog film", "analog photo", "cinematic still", "cinematic"].includes(pw?.value) || !!linkedInput("style_preset");
+    focusSel.disabled = !fw || !!linkedInput("photo_focus") || !isPhoto;
+    focusSel.style.opacity = isPhoto ? 1 : 0.45; focusLab.style.opacity = isPhoto ? 0.8 : 0.4;
+    syncBypassBtn();
     fillSel(latentSel, comboOpts(lw), lw?.value);
     if (bw && document.activeElement !== batchIn) batchIn.value = bw.value ?? 1;
     batchIn.disabled = !!linkedInput("batch_size");
@@ -454,11 +476,12 @@ function setupNode(node) {
   }
   batchIn.onchange = () => { const bw = curBatchW(); if (bw && !linkedInput("batch_size")) { const v = Math.max(1, Math.round(+batchIn.value) || 1); bw.value = v; batchIn.value = v; bw.callback?.(v); node.setDirtyCanvas?.(true, true); } };
   latentSel.onchange = () => { const lw = curLatentW(); if (lw && !linkedInput("latent_type")) { lw.value = latentSel.value; lw.callback?.(latentSel.value); node.setDirtyCanvas?.(true, true); } };
-  presetSel.onchange = () => { const pw = curPresetW(); if (pw && !linkedInput("style_preset")) { pw.value = presetSel.value; pw.callback?.(presetSel.value); node.setDirtyCanvas?.(true, true); } };
+  presetSel.onchange = () => { const pw = curPresetW(); if (pw && !linkedInput("style_preset")) { pw.value = presetSel.value; pw.callback?.(presetSel.value); node.setDirtyCanvas?.(true, true); } syncGen(); };
 
+  focusSel.onchange = () => { const fw = curFocusW(); if (fw && !linkedInput("photo_focus")) { fw.value = focusSel.value; fw.callback?.(focusSel.value); node.setDirtyCanvas?.(true, true); } };
   canvasSel.onchange = () => { const cw = curCanvasW(); if (cw && !linkedInput("canvas")) { cw.value = canvasSel.value; cw.callback?.(canvasSel.value); node.setDirtyCanvas?.(true, true); } };
 
-  for (const i of [typeSel, textIn, descIn, palIn, colorIn, dispIn, usePal, charIn, presetSel, canvasSel, batchIn, latentSel]) {
+  for (const i of [typeSel, textIn, descIn, palIn, colorIn, dispIn, usePal, charIn, presetSel, focusSel, canvasSel, batchIn, latentSel]) {
     i.addEventListener("keydown", (e) => e.stopPropagation());
     i.addEventListener("pointerdown", (e) => e.stopPropagation());
   }
@@ -596,6 +619,7 @@ function setupNode(node) {
       if (g > 4) { ctx.beginPath(); for (let x = g * Math.max(1, Math.floor(-view.ox / g)); x < Math.min(cw, view.aw - view.ox); x += g) { ctx.moveTo(x + .5, 0); ctx.lineTo(x + .5, ch); } for (let y = g * Math.max(1, Math.floor(-view.oy / g)); y < Math.min(ch, view.ah - view.oy); y += g) { ctx.moveTo(0, y + .5); ctx.lineTo(cw, y + .5); } ctx.stroke(); }
     }
     ctx.font = "11px sans-serif"; ctx.textBaseline = "top";
+    ctx.globalAlpha = bypassOn() ? 0.3 : 1; // bypassed boxes are dimmed
     boxes.forEach((b, i) => {
       const x = b.x * s, y = b.y * s, w = b.width * s, h = b.height * s, c = boxColor(i);
       ctx.fillStyle = c + (i === sel ? "40" : "20"); ctx.fillRect(x, y, w, h);
@@ -614,6 +638,7 @@ function setupNode(node) {
         }
       }
     });
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -870,6 +895,8 @@ function setupNode(node) {
   const curLatentW = () => node.widgets?.find((w) => w.name === "latent_type") ?? latentW;
   const curPresetW = () => node.widgets?.find((w) => w.name === "style_preset") ?? presetW;
   const curCanvasW = () => node.widgets?.find((w) => w.name === "canvas") ?? canvasW;
+  const curFocusW = () => node.widgets?.find((w) => w.name === "photo_focus") ?? focusW;
+  const curBypassW = () => node.widgets?.find((w) => w.name === "bypass_boxes") ?? bypassW;
   function findDesc(obj, key) {
     for (let o = obj; o; o = Object.getPrototypeOf(o)) { const d = Object.getOwnPropertyDescriptor(o, key); if (d) return d; }
     return null;
@@ -1066,7 +1093,7 @@ function setupNode(node) {
     if (!Array.isArray(info?.properties?.cdc_dims)) delete node.properties.cdc_dims; // old workflow: boxes are at saved width/height
     if (node.properties.cdc_follow === undefined) node.properties.cdc_follow = "auto";
     hideWidget(curDataW()); hideWidget(curLastW());
-    for (const w of [curBatchW(), curLatentW(), curPresetW(), curCanvasW()]) hideWidget(w);
+    for (const w of [curBatchW(), curLatentW(), curPresetW(), curCanvasW(), curBypassW(), curFocusW()]) hideWidget(w);
     boxes = migrateBoxes(parse(curDataW()?.value)); sel = -1;
     { const dw = curDataW(); if (dw && boxes.length) dw.value = JSON.stringify(boxes); } // persist migration
     watchValue(curWidthW()); watchValue(curHeightW()); watchDomInputs();
