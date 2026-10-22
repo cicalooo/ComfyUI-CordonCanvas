@@ -2,7 +2,7 @@
 
 Canvas bounding-box editor for ComfyUI that builds MOSS-Image layout prompts, empty latents and box conditioning.
 
-<!-- screenshot -->
+![Cordon Canvas in ComfyUI](docs/screenshot.png)
 
 ## Install
 ```bash
