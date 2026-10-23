@@ -1,4 +1,4 @@
-"""bypass_boxes: prompt outputs fall back to the no-boxes path (caption + style sentence)."""
+"""bypass_boxes: prompt outputs fall back to the no-boxes path (caption + short medium lead)."""
 import importlib.util
 import json
 import os
@@ -27,7 +27,7 @@ BOXES = json.dumps([
 
 def _run(bypass, box_data=BOXES):
     out = mod.CordonCanvas.execute(512, 512, box_data=box_data, caption="a quiet street",
-                                   style_preset="photo", canvas="single", bypass_boxes=bypass)
+                                   style_preset="photo", bypass_boxes=bypass)
     preview, bboxes, elements, latent, chars, native, rel = out.args
     return elements, chars, native, rel
 
@@ -36,7 +36,7 @@ def test_bypass_matches_no_boxes_path():
     elements, chars, native, rel = _run(True)
     _, _, empty_native, _ = _run(False, box_data="[]")
     assert native == empty_native == rel
-    assert native.startswith("A real-world photograph") and "A quiet street." in native
+    assert native.startswith("A photograph.") and "A quiet street" in native
     assert not native.lstrip().startswith("{")
     assert chars == "" and len(elements) == 0
 
@@ -50,7 +50,7 @@ def test_without_bypass_layout_has_boxes():
 
 def test_bypass_with_photo_focus():
     out = mod.CordonCanvas.execute(512, 512, box_data=BOXES, caption="a quiet street", style_preset="photo",
-                                   canvas="single", bypass_boxes=True, photo_focus="full focus")
+                                   bypass_boxes=True, photo_focus="full focus")
     native, rel = out.args[5], out.args[6]
     assert native == rel and native.endswith("everything in sharp focus front to back.")
     assert "lens depth of field" not in native

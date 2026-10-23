@@ -93,21 +93,12 @@ def layout_to_boxes(layout: dict, width: int, height: int) -> list:
     return out
 
 
-def text_caption(desc: str, text: str) -> str:
-    """Official text items keep the literal string in `text` and describe typography in
-    `caption`. Users report weak rendering when the caption doesn't say it is text, so the
-    literal is also quoted in the caption when the description doesn't already contain it."""
-    desc = (desc or "").strip()
-    text = (text or "").strip()
-    if not text or text in desc:
-        return desc or (f'The text "{text}".' if text else desc)
-    if not desc:
-        return f'The text "{text}".'
-    return f'{desc.rstrip(" .")}, reading "{text}".' if "text" in desc.lower() else f'The text "{text}": {desc}'
-
-
 def _items(boxes: list, palettes: list, width: int, height: int):
-    """Yield (item_without_bbox, frac_box) for each canvas box, in element order."""
+    """Yield (item_without_bbox, frac_box) for each canvas box, in element order.
+
+    Text items match stock MOSS-Image Layout Prompt / OpenMOSS examples: typography
+    lives in `caption` (user desc only); the literal string is only in `text`.
+    """
     for box, palette in zip(boxes, palettes):
         meta = box.get("metadata") if isinstance(box.get("metadata"), dict) else {}
         is_text = meta.get("type") == "text"
@@ -115,7 +106,6 @@ def _items(boxes: list, palettes: list, width: int, height: int):
         item = {"label": label, "caption": str(meta.get("desc", "") or "")}
         if is_text:
             item["text"] = str(meta.get("text", "") or "")
-            item["caption"] = text_caption(item["caption"], item["text"])
         if palette:
             item["palette"] = list(palette)[:5]
         x0 = _clamp01(float(box.get("x", 0)) / width)
@@ -125,41 +115,70 @@ def _items(boxes: list, palettes: list, width: int, height: int):
         yield item, (min(y0, y1), min(x0, x1), max(y0, y1), max(x0, x1))
 
 
-# Preset name -> summary.meta tags, a medium PREFIX that leads the caption and a short
-# reinforcing SUFFIX with concrete visible medium cues. Evidence (OpenMOSS/MOSS-Image):
-# training captions open with framing + medium ("A top-down flat lay of a watercolor
-# painting ...", paper Fig. 2) and the recaptioner describes "artistic style" as visible
-# content; summary.meta is an "array of medium/genre tags" kept ~90% of the time in
-# training. Positive-only wording; the caption widget itself is never rewritten.
+# Preset name -> one summary.meta tag (boxed) and a short medium lead (plain / bypass).
+# Boxed summary.caption stays the user caption only — same as stock Create Bounding Boxes /
+# MOSS-Image Layout Prompt. Plain-text prompts may open with a one-clause medium lead.
 STYLE_PRESETS = {
-    "photo": {
-        "meta": ["photograph"],
-        "prefix": "A real-world photograph captured with a camera.",
-        "prompt": "Natural light, lens depth of field, fine sensor grain and real-world textures with small imperfections.",
-    },
-    "3d render": {
-        "meta": ["3d render"],
-        "prefix": "A 3D CGI render.",
-        "prompt": "Physically based materials, ray-traced lighting and soft shadows, clean modeled geometry and subtle subsurface scattering.",
-    },
-    "2d art": {
-        "meta": ["illustration"],
-        "prefix": "A 2D digital illustration.",
-        "prompt": "Hand-drawn linework, flat or cel shading, a limited color palette and a flat, graphic look.",
-    },
+    "photo": {"meta": ["photograph"], "lead": "A photograph."},
+    "film": {"meta": ["film"], "lead": "A film still."},
+    "cinematic": {"meta": ["cinematic"], "lead": "A cinematic shot."},
+    "studio product": {"meta": ["studio product"], "lead": "A studio product photo."},
+    "editorial": {"meta": ["editorial"], "lead": "An editorial photograph."},
+    "anime": {"meta": ["anime"], "lead": "An anime illustration."},
+    "illustration": {"meta": ["illustration"], "lead": "An illustration."},
+    "watercolor": {"meta": ["watercolor"], "lead": "A watercolor painting."},
+    "oil painting": {"meta": ["oil painting"], "lead": "An oil painting."},
+    "3d render": {"meta": ["3d render"], "lead": "A 3D render."},
+    "pixel art": {"meta": ["pixel art"], "lead": "Pixel art."},
+    "poster": {"meta": ["poster"], "lead": "A poster."},
+    "comic": {"meta": ["comic"], "lead": "A comic panel."},
+    "sketch": {"meta": ["sketch"], "lead": "A sketch."},
 }
 STYLE_PRESET_NAMES = ["none", *STYLE_PRESETS]
-# Every earlier preset name -> nearest current preset, so old workflows still validate.
+# Old names no longer in STYLE_PRESETS -> nearest current preset (workflows still validate).
 LEGACY_PRESET_ALIASES = {
-    "photoreal": "photo", "photograph": "photo", "studio product": "photo", "editorial": "photo",
-    "analog film": "photo", "analog photo": "photo", "cinematic still": "photo", "cinematic": "photo",
-    "3d": "3d render", "unreal cinematic": "3d render", "unreal": "3d render", "cgi render": "3d render", "cgi": "3d render",
-    "illustration": "2d art", "anime": "2d art", "oil painting": "2d art", "watercolor": "2d art",
-    "pixel art": "2d art", "poster": "2d art",
+    "photoreal": "photo", "photograph": "photo", "analog photo": "photo",
+    "analog film": "film", "cinematic still": "cinematic",
+    "3d": "3d render", "unreal cinematic": "3d render", "unreal": "3d render",
+    "cgi render": "3d render", "cgi": "3d render",
+    "2d art": "illustration",
 }
 STYLE_PRESET_OPTIONS = STYLE_PRESET_NAMES + [k for k in LEGACY_PRESET_ALIASES if k not in STYLE_PRESETS]
-CANVAS_MODES = ["single", "multi_panel", "collage"]
-# photo-only camera/focus phrase; when set, the photo suffix drops its depth-of-field clause.
+
+# Dock camera dropdowns: option label is also the boxed meta tag (when not none).
+CAM_POS_OPTIONS = ["none", "eye level", "low angle", "high angle", "bird's eye", "worm's eye", "dutch angle"]
+CAM_LOC_OPTIONS = ["none", "outdoor", "indoor", "studio", "street", "nature", "urban"]
+CAM_ANGLE_OPTIONS = ["none", "front view", "three-quarter", "profile", "over-shoulder", "close-up", "wide shot"]
+# Plain-path short sentences (appended like photo_focus).
+CAM_POS_PLAIN = {
+    "none": "",
+    "eye level": "Eye-level camera.",
+    "low angle": "Low-angle shot.",
+    "high angle": "High-angle shot.",
+    "bird's eye": "Bird's-eye view.",
+    "worm's eye": "Worm's-eye view.",
+    "dutch angle": "Dutch angle.",
+}
+CAM_LOC_PLAIN = {
+    "none": "",
+    "outdoor": "Outdoor setting.",
+    "indoor": "Indoor setting.",
+    "studio": "Studio setting.",
+    "street": "Street setting.",
+    "nature": "Nature setting.",
+    "urban": "Urban setting.",
+}
+CAM_ANGLE_PLAIN = {
+    "none": "",
+    "front view": "Front view.",
+    "three-quarter": "Three-quarter view.",
+    "profile": "Profile view.",
+    "over-shoulder": "Over-the-shoulder framing.",
+    "close-up": "Close-up.",
+    "wide shot": "Wide shot.",
+}
+
+# photo-only focus: plain path gets the long sentence; boxed path gets a short summary.meta tag.
 PHOTO_FOCUS = {
     "none": "",
     "shallow depth of field": "Shot at f/1.8, shallow depth of field, soft creamy bokeh background.",
@@ -169,8 +188,17 @@ PHOTO_FOCUS = {
     "telephoto": "200mm telephoto lens, compressed perspective, blurred background.",
     "macro": "Macro lens close-up, razor-thin focus plane.",
 }
+# Boxed meta tags (photo preset only). Order into summary.meta: preset → focus → cams (max 4).
+PHOTO_FOCUS_META = {
+    "none": "",
+    "shallow depth of field": "shallow dof",
+    "full focus": "deep focus",
+    "moderate": "moderate focus",
+    "wide-angle": "wide-angle",
+    "telephoto": "telephoto",
+    "macro": "macro",
+}
 PHOTO_FOCUS_NAMES = list(PHOTO_FOCUS)
-PHOTO_SUFFIX_NO_DOF = "Natural light, fine sensor grain and real-world textures with small imperfections."
 
 
 def resolve_preset(preset: str) -> str:
@@ -182,58 +210,87 @@ def style_tags(style: str) -> list:
     return [m.strip() for m in re.split(r"[,\n]", style or "") if m.strip()]
 
 
-def bake_style(caption: str, style: str = "", preset: str = "none", focus: str = "none"):
-    """Return (caption, style_csv) with a preset applied for both empty and boxed outputs.
+def _camera_meta(cam_pos="none", cam_loc="none", cam_angle="none") -> list:
+    tags = []
+    for v, opts in ((cam_pos, CAM_POS_OPTIONS), (cam_loc, CAM_LOC_OPTIONS), (cam_angle, CAM_ANGLE_OPTIONS)):
+        t = (v or "none").strip()
+        if t and t != "none" and t in opts:
+            tags.append(t)
+    return tags
 
-    The preset's medium prefix leads the caption and its cue sentence is appended
-    (plain-text path and summary.caption); idempotent on already-baked text.
-    Preset meta tags lead summary.meta; extra style tags (legacy callers only, the
-    widget was removed) fill the remaining slots (max 4).
+
+def _append_plain_phrase(cap: str, phrase: str) -> str:
+    phrase = (phrase or "").strip()
+    if not phrase or phrase.lower() in (cap or "").lower():
+        return cap
+    if cap and cap[-1] not in ".!?\"'":
+        cap += "."
+    return f"{cap} {phrase}".strip()
+
+
+def bake_style(caption: str, style: str = "", preset: str = "none", focus: str = "none", *,
+               boxed: bool = False, cam_pos: str = "none", cam_loc: str = "none", cam_angle: str = "none"):
+    """Return (caption, style_csv).
+
+    boxed=True (layout with items): caption is the user string trimmed only; summary.meta
+    fills as preset → focus tag (photo only) → camera tags (max 4). No medium prose in
+    summary.caption.
+
+    boxed=False (no boxes / bypass plain text): optional short medium lead, then the
+    user caption; photo_focus (photo only) and camera phrases append as short sentences.
+    Idempotent on already-leaded / already-phrased text.
     """
     cap = (caption or "").strip()
     tags = style_tags(style)
-    spec = STYLE_PRESETS.get(resolve_preset(preset))
-    if spec:
-        seen = set()
-        merged = []
-        for tag in list(spec["meta"]) + tags:
-            key = tag.lower()
-            if not tag or key in seen:
-                continue
-            seen.add(key)
-            merged.append(tag)
-        tags = merged[:4]
-        prefix = spec.get("prefix", "").strip()
-        suffix = spec.get("prompt", "").strip()
-        focus_phrase = PHOTO_FOCUS.get(focus or "none", "") if resolve_preset(preset) == "photo" else ""
-        if focus_phrase:
-            suffix = f"{PHOTO_SUFFIX_NO_DOF} {focus_phrase}"
-        if prefix and not cap.lower().startswith(prefix.lower()):
-            body = cap[:1].upper() + cap[1:] if cap else ""
-            cap = f"{prefix} {body}".strip()
-        if suffix and suffix.lower() not in cap.lower():
-            if cap and cap[-1] not in ".!?\"'":
-                cap += "."
-            cap = f"{cap} {suffix}".strip()
+    name = resolve_preset(preset)
+    cam_tags = _camera_meta(cam_pos, cam_loc, cam_angle)
+    spec = STYLE_PRESETS.get(name)
+    preset_meta = list(spec["meta"]) if spec else []
+    focus_key = (focus or "none").strip()
+    focus_tag = ""
+    if name == "photo" and focus_key and focus_key != "none":
+        focus_tag = (PHOTO_FOCUS_META.get(focus_key) or "").strip()
+    seen = set()
+    merged = []
+    # preset → focus → cams → legacy style tags (DoF kept when three cams are set)
+    for tag in preset_meta + ([focus_tag] if focus_tag else []) + cam_tags + tags:
+        key = tag.lower()
+        if not tag or key in seen:
+            continue
+        seen.add(key)
+        merged.append(tag)
+    tags = merged[:4]
+    if not boxed:
+        if spec:
+            lead = spec.get("lead", "").strip()
+            if lead and not cap.lower().startswith(lead.lower()):
+                body = cap[:1].upper() + cap[1:] if cap else ""
+                cap = f"{lead} {body}".strip()
+            focus_phrase = PHOTO_FOCUS.get(focus_key, "") if name == "photo" else ""
+            cap = _append_plain_phrase(cap, focus_phrase)
+        for table, key in ((CAM_POS_PLAIN, cam_pos), (CAM_LOC_PLAIN, cam_loc), (CAM_ANGLE_PLAIN, cam_angle)):
+            cap = _append_plain_phrase(cap, table.get((key or "none").strip(), ""))
     return cap, ", ".join(tags)
 
 
-def _summary(caption: str, style: str, canvas: str = "single") -> dict:
+def _summary(caption: str, style: str) -> dict:
+    """Always summary.canvas = single (official default; multi_panel/collage unused)."""
     s = {}
     meta = style_tags(style)
     if meta:
         s["meta"] = meta[:4]
-    s["canvas"] = canvas if canvas in CANVAS_MODES else "single"
+    s["canvas"] = "single"
     s["caption"] = (caption or "").strip()
     return s
 
 
-def build_native(boxes, palettes, width, height, caption="", style="", preset="none", canvas="single", focus="none") -> str:
+def build_native(boxes, palettes, width, height, caption="", style="", preset="none",
+                 focus="none", cam_pos="none", cam_loc="none", cam_angle="none", **_ignored) -> str:
     """MOSS native abs_centralized JSON straight from the pixel boxes (no 0-1000 quantisation).
     Edges enclose the box like the stock MOSS-Image Layout Prompt node.
-    No boxes: the caption is passed through as plain text so the encoder still has a prompt.
-    A style preset is baked into that text and, when boxes exist, into summary.caption and summary.meta."""
-    caption, style = bake_style(caption, style, preset, focus)
+    With boxes: summary.caption is the user caption only; style/focus/camera → summary.meta.
+    No boxes: plain-text prompt with optional short medium lead (+ photo_focus + camera).
+    Legacy canvas= kwarg is accepted and ignored (always summary.canvas=single)."""
     items = []
     hw, hh = width // 2, height // 2
     for item, (fy0, fx0, fy1, fx1) in _items(boxes, palettes, width, height):
@@ -244,20 +301,26 @@ def build_native(boxes, palettes, width, height, caption="", style="", preset="n
             bbox[3] = bbox[1] + 1
         item["bbox"] = bbox
         items.append(item)
+    bake_kw = dict(cam_pos=cam_pos, cam_loc=cam_loc, cam_angle=cam_angle)
     if not items:
+        caption, _ = bake_style(caption, style, preset, focus, boxed=False, **bake_kw)
         return (caption or "").strip()
-    layout = {"summary": _summary(caption, style, canvas), "items": items,
+    caption, style = bake_style(caption, style, preset, focus, boxed=True, **bake_kw)
+    layout = {"summary": _summary(caption, style), "items": items,
               "bbox_coord_space": NATIVE_SPACE, "bbox_format": "yxyx"}
     return json.dumps(layout, ensure_ascii=False, separators=(",", ":"))
 
 
-def build_relative(boxes, palettes, width, height, caption="", style="", preset="none", canvas="single", focus="none") -> str:
-    """Portable relative_1000 layout: feed it back into any canvas's bboxes input at any resolution."""
-    caption, style = bake_style(caption, style, preset, focus)
+def build_relative(boxes, palettes, width, height, caption="", style="", preset="none",
+                   focus="none", cam_pos="none", cam_loc="none", cam_angle="none", **_ignored) -> str:
+    """Portable relative_1000 layout: feed it back into any canvas's bboxes input at any resolution.
+    Legacy canvas= kwarg is accepted and ignored (always summary.canvas=single)."""
     items = []
     for item, frac in _items(boxes, palettes, width, height):
         item["bbox"] = [max(0, min(1000, round(v * 1000))) for v in frac]
         items.append(item)
-    layout = {"summary": _summary(caption, style, canvas), "items": items,
+    caption, style = bake_style(caption, style, preset, focus, boxed=bool(items),
+                                cam_pos=cam_pos, cam_loc=cam_loc, cam_angle=cam_angle)
+    layout = {"summary": _summary(caption, style), "items": items,
               "bbox_coord_space": "relative_1000", "bbox_format": "yxyx"}
     return json.dumps(layout, ensure_ascii=False, indent=1)

@@ -265,8 +265,9 @@ function setupNode(node) {
   hideWidget(dataW); hideWidget(lastW);
   // batch/latent/preset live in the dock (keeps the node body small); hidden on the node itself.
   // caption lives on the node itself (multiline widget / linkable input) — not duplicated in the dock.
-  const batchW = W("batch_size"), latentW = W("latent_type"), presetW = W("style_preset"), canvasW = W("canvas"), bypassW = W("bypass_boxes"), focusW = W("photo_focus");
-  for (const w of [batchW, latentW, presetW, canvasW, bypassW, focusW]) hideWidget(w);
+  const batchW = W("batch_size"), latentW = W("latent_type"), presetW = W("style_preset"), bypassW = W("bypass_boxes"), focusW = W("photo_focus");
+  const camPosW = W("cam_pos"), camLocW = W("cam_loc"), camAngleW = W("cam_angle");
+  for (const w of [batchW, latentW, presetW, bypassW, focusW, camPosW, camLocW, camAngleW]) hideWidget(w);
 
   let boxes = migrateBoxes(parse(dataW?.value));
   let sel = -1, drag = null, bgImg = null, upInfo = null; // upInfo: {url, entry, state} from the upstream chain
@@ -367,14 +368,84 @@ function setupNode(node) {
     }
     upSig = ""; refreshUpstream();
   }
+  // Fit / Stretch remap from cdc_geom_src (boxes+dims at the size they were authored).
+  // Dim changes do NOT auto-move boxes — only snapshot geom_src — so Fit/Stretch are the
+  // explicit remaps. Revert undoes the last Fit/Stretch (one level).
+  const snapBoxes = (list) => JSON.parse(JSON.stringify(list || []));
+  const syncGeomBtns = () => {
+    const hasSrc = Array.isArray(node.properties.cdc_geom_src?.boxes) && node.properties.cdc_geom_src.w > 0;
+    const hasUndo = Array.isArray(node.properties.cdc_geom_undo?.boxes);
+    fitBtn.disabled = !hasSrc; stretchBtn.disabled = !hasSrc; revertBtn.disabled = !hasUndo;
+    fitBtn.style.opacity = hasSrc ? 1 : 0.4; stretchBtn.style.opacity = hasSrc ? 1 : 0.4;
+    revertBtn.style.opacity = hasUndo ? 1 : 0.4;
+  };
+  const pushGeomUndo = () => {
+    // Snapshot boxes in the space they are currently authored in (may differ from live dims
+    // after a size change and before Fit/Stretch).
+    const bs = node.properties.cdc_boxes_dims;
+    const [cw, ch] = dims();
+    const w = Array.isArray(bs) && bs[0] > 0 ? +bs[0] : cw;
+    const h = Array.isArray(bs) && bs[1] > 0 ? +bs[1] : ch;
+    node.properties.cdc_geom_undo = { w, h, boxes: snapBoxes(boxes) };
+  };
+  const clipBox = (b, nw, nh) => {
+    let x = Math.round(+b.x), y = Math.round(+b.y), w = Math.max(1, Math.round(+b.width)), h = Math.max(1, Math.round(+b.height));
+    if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
+    if (x + w > nw) w = Math.max(1, nw - x); if (y + h > nh) h = Math.max(1, nh - y);
+    return { x, y, width: Math.max(1, w), height: Math.max(1, h), metadata: b.metadata };
+  };
+  const remapFromSrc = (mode) => {
+    const src = node.properties.cdc_geom_src;
+    if (!src || !(src.w > 0) || !(src.h > 0) || !Array.isArray(src.boxes)) {
+      flash("Fit/Stretch need a previous size — change width/height first, then Fit or Stretch");
+      return;
+    }
+    const [nw, nh] = dims();
+    pushGeomUndo();
+    const out = [];
+    if (mode === "stretch") {
+      const sx = nw / src.w, sy = nh / src.h;
+      for (const b of src.boxes) out.push(clipBox({ ...b, x: b.x * sx, y: b.y * sy, width: b.width * sx, height: b.height * sy }, nw, nh));
+    } else {
+      // letterbox: uniform scale of the previous canvas into the new one, centred (same as bg overlay)
+      const sc = Math.min(nw / src.w, nh / src.h);
+      const ox = (nw - src.w * sc) / 2, oy = (nh - src.h * sc) / 2;
+      for (const b of src.boxes) out.push(clipBox({ ...b, x: ox + b.x * sc, y: oy + b.y * sc, width: b.width * sc, height: b.height * sc }, nw, nh));
+    }
+    boxes = out; sel = Math.min(sel, boxes.length - 1);
+    node.properties.cdc_boxes_dims = [nw, nh]; // boxes now live in current canvas space
+    commit(); syncGeomBtns();
+    flash(mode === "stretch"
+      ? `stretch: remapped from ${src.w}×${src.h} → ${nw}×${nh} (independent X/Y)`
+      : `fit: remapped from ${src.w}×${src.h} → ${nw}×${nh} (uniform, letterboxed)`);
+  };
+  const revertGeom = () => {
+    const u = node.properties.cdc_geom_undo;
+    if (!u || !Array.isArray(u.boxes)) { flash("nothing to revert"); return; }
+    boxes = snapBoxes(u.boxes); sel = Math.min(sel, boxes.length - 1);
+    // undo restores boxes as they were (in current canvas space, pre-remap)
+    node.properties.cdc_boxes_dims = [u.w, u.h];
+    delete node.properties.cdc_geom_undo;
+    commit(); syncGeomBtns();
+    flash(`reverted to pre-Fit/Stretch boxes (${u.w}×${u.h})`);
+  };
+  const fitBtn = btn("⊡ fit", () => remapFromSrc("fit"),
+    "Fit: remap boxes from the size before the last width/height change with uniform letterbox scale (centred), like fitting the old canvas into the new one. Dim changes no longer move boxes automatically.");
+  const stretchBtn = btn("⤢ stretch", () => remapFromSrc("stretch"),
+    "Stretch: remap boxes from the size before the last width/height change, scaling X and Y independently to the new canvas.");
+  const revertBtn = btn("↶ revert", () => revertGeom(),
+    "Revert: undo the last Fit or Stretch (one level). Disabled when empty.");
+
   bar.append(btn("🗑", () => { boxes = []; sel = -1; commit(); }, "Clear all boxes"),
              btn("⌫", () => removeSel(), "Delete selected box"),
              btn("▲", () => reorder(1), "Move box forward (drawn later, on top)"),
              btn("▼", () => reorder(-1), "Move box backward (drawn earlier, below)"),
+             fitBtn, stretchBtn, revertBtn,
              ovBtn, ovSl, followBtn, bypassBtn);
   syncOvBtn();
+  syncGeomBtns();
   let flashTimer = null;
-  const HINT_OPS = "drag: new/move/resize · Shift/Ctrl+drag: new box over others · Alt+click: cycle overlapping · Del/right-click: remove · Esc: deselect · wheel: zoom · middle/Space+drag: pan · dbl-click empty: fit · Ctrl+wheel: graph zoom";
+  const HINT_OPS = "drag: new/move/resize · Shift/Ctrl+drag: new box over others · Alt+click: cycle overlapping · Del/right-click: remove · Esc: deselect · Fit/Stretch: remap boxes after width/height change · Revert: undo Fit/Stretch · wheel: zoom · middle/Space+drag: pan · dbl-click empty: fit · Ctrl+wheel: graph zoom";
   const baseHint = () => {
     const [dw, dh] = dims();
     const srcs = [...new Set([eff.srcW, eff.srcH])].filter((x) => x !== "widget");
@@ -439,11 +510,19 @@ function setupNode(node) {
   const latentSel = el("select", { title: "Channels/downscale of the empty latent output" }, { ...inStyle, flex: 1 });
   const batchLatRow = el("div", {}, { display: "flex", gap: "6px", alignItems: "center" });
   batchLatRow.append(batchIn, latentSel);
-  const canvasSel = el("select", { title: "summary.canvas: single, multi_panel or collage" }, inStyle);
-  const presetLab = lab("preset"), canvasLab = lab("canvas"), batchLatLab = lab("batch·lat");
-  const focusSel = el("select", { title: "Camera/focus for the photo preset (ignored for other presets)" }, inStyle);
+  const presetLab = lab("preset"), batchLatLab = lab("batch·lat");
+  const focusSel = el("select", { title: "Photo preset only: boxed → short DoF meta tag; plain/bypass → focus sentence" }, inStyle);
   const focusLab = lab("focus");
-  genDiv.append(presetLab, presetSel, focusLab, focusSel, canvasLab, canvasSel, batchLatLab, batchLatRow);
+  const camPosSel = el("select", { title: "Camera position / height" }, { ...inStyle, flex: 1, minWidth: 0 });
+  const camLocSel = el("select", { title: "Camera location / setting" }, { ...inStyle, flex: 1, minWidth: 0 });
+  const camAngleSel = el("select", { title: "Framing / angle" }, { ...inStyle, flex: 1, minWidth: 0 });
+  const camPosLab = el("span", { textContent: "cam pos" }, { opacity: 0.75, fontSize: "11px", whiteSpace: "nowrap" });
+  const camLocLab = el("span", { textContent: "cam loc" }, { opacity: 0.75, fontSize: "11px", whiteSpace: "nowrap" });
+  const camAngleLab = el("span", { textContent: "angle" }, { opacity: 0.75, fontSize: "11px", whiteSpace: "nowrap" });
+  const camRow = el("div", {}, { display: "flex", gap: "4px", alignItems: "center", gridColumn: "1 / -1" });
+  const camPair = (l, s) => { const d = el("div", {}, { display: "flex", flexDirection: "column", gap: "1px", flex: 1, minWidth: 0 }); d.append(l, s); return d; };
+  camRow.append(camPair(camPosLab, camPosSel), camPair(camLocLab, camLocSel), camPair(camAngleLab, camAngleSel));
+  genDiv.append(presetLab, presetSel, focusLab, focusSel, camRow, batchLatLab, batchLatRow);
   root.append(bar, hint, wrap, panel, genDiv);
 
   const fillSel = (sel, opts, cur) => {
@@ -457,16 +536,21 @@ function setupNode(node) {
   function syncGen() {
     const pw = curPresetW(), lw = curLatentW(), bw = curBatchW();
     // legacy preset names stay valid on the widget but are only listed when currently selected
-    const current = new Set(["none", "photo", "3d render", "2d art"]);
+    const current = new Set(["none", "photo", "film", "cinematic", "studio product", "editorial", "anime",
+      "illustration", "watercolor", "oil painting", "3d render", "pixel art", "poster", "comic", "sketch"]);
     fillSel(presetSel, comboOpts(pw).filter((v) => current.has(v) || v === pw?.value), pw?.value);
-    const cw = curCanvasW();
-    fillSel(canvasSel, comboOpts(cw).length ? comboOpts(cw) : ["single", "multi_panel", "collage"], cw?.value ?? "single");
-    canvasSel.disabled = !cw || !!linkedInput("canvas");
     const fw = curFocusW();
     fillSel(focusSel, comboOpts(fw), fw?.value ?? "none");
-    const isPhoto = ["photo", "photoreal", "photograph", "studio product", "editorial", "analog film", "analog photo", "cinematic still", "cinematic"].includes(pw?.value) || !!linkedInput("style_preset");
+    const isPhoto = ["photo", "photoreal", "photograph", "analog photo"].includes(pw?.value) || !!linkedInput("style_preset");
     focusSel.disabled = !fw || !!linkedInput("photo_focus") || !isPhoto;
     focusSel.style.opacity = isPhoto ? 1 : 0.45; focusLab.style.opacity = isPhoto ? 0.8 : 0.4;
+    const cpw = curCamPosW(), clw = curCamLocW(), caw = curCamAngleW();
+    fillSel(camPosSel, comboOpts(cpw).length ? comboOpts(cpw) : ["none", "eye level", "low angle", "high angle", "bird's eye", "worm's eye", "dutch angle"], cpw?.value ?? "none");
+    fillSel(camLocSel, comboOpts(clw).length ? comboOpts(clw) : ["none", "outdoor", "indoor", "studio", "street", "nature", "urban"], clw?.value ?? "none");
+    fillSel(camAngleSel, comboOpts(caw).length ? comboOpts(caw) : ["none", "front view", "three-quarter", "profile", "over-shoulder", "close-up", "wide shot"], caw?.value ?? "none");
+    camPosSel.disabled = !cpw || !!linkedInput("cam_pos");
+    camLocSel.disabled = !clw || !!linkedInput("cam_loc");
+    camAngleSel.disabled = !caw || !!linkedInput("cam_angle");
     syncBypassBtn();
     fillSel(latentSel, comboOpts(lw), lw?.value);
     if (bw && document.activeElement !== batchIn) batchIn.value = bw.value ?? 1;
@@ -479,9 +563,11 @@ function setupNode(node) {
   presetSel.onchange = () => { const pw = curPresetW(); if (pw && !linkedInput("style_preset")) { pw.value = presetSel.value; pw.callback?.(presetSel.value); node.setDirtyCanvas?.(true, true); } syncGen(); };
 
   focusSel.onchange = () => { const fw = curFocusW(); if (fw && !linkedInput("photo_focus")) { fw.value = focusSel.value; fw.callback?.(focusSel.value); node.setDirtyCanvas?.(true, true); } };
-  canvasSel.onchange = () => { const cw = curCanvasW(); if (cw && !linkedInput("canvas")) { cw.value = canvasSel.value; cw.callback?.(canvasSel.value); node.setDirtyCanvas?.(true, true); } };
+  camPosSel.onchange = () => { const w = curCamPosW(); if (w && !linkedInput("cam_pos")) { w.value = camPosSel.value; w.callback?.(camPosSel.value); node.setDirtyCanvas?.(true, true); } };
+  camLocSel.onchange = () => { const w = curCamLocW(); if (w && !linkedInput("cam_loc")) { w.value = camLocSel.value; w.callback?.(camLocSel.value); node.setDirtyCanvas?.(true, true); } };
+  camAngleSel.onchange = () => { const w = curCamAngleW(); if (w && !linkedInput("cam_angle")) { w.value = camAngleSel.value; w.callback?.(camAngleSel.value); node.setDirtyCanvas?.(true, true); } };
 
-  for (const i of [typeSel, textIn, descIn, palIn, colorIn, dispIn, usePal, charIn, presetSel, focusSel, canvasSel, batchIn, latentSel]) {
+  for (const i of [typeSel, textIn, descIn, palIn, colorIn, dispIn, usePal, charIn, presetSel, focusSel, camPosSel, camLocSel, camAngleSel, batchIn, latentSel]) {
     i.addEventListener("keydown", (e) => e.stopPropagation());
     i.addEventListener("pointerdown", (e) => e.stopPropagation());
   }
@@ -520,6 +606,11 @@ function setupNode(node) {
   function commit(redraw = true) {
     const dw = curDataW();
     if (dw) dw.value = JSON.stringify(boxes);
+    // If boxes already live on the current canvas (no pending geom_src mismatch), keep authored dims in sync.
+    const [cw, ch] = dims();
+    const src = node.properties.cdc_geom_src;
+    const pending = src && src.w > 0 && src.h > 0 && Array.isArray(src.boxes) && (src.w !== cw || src.h !== ch);
+    if (!pending && cw > 0 && ch > 0) node.properties.cdc_boxes_dims = [cw, ch];
     node.setDirtyCanvas?.(true, true);
     if (redraw) { syncPanel(); draw(); }
   }
@@ -894,8 +985,10 @@ function setupNode(node) {
   const curBatchW = () => node.widgets?.find((w) => w.name === "batch_size") ?? batchW;
   const curLatentW = () => node.widgets?.find((w) => w.name === "latent_type") ?? latentW;
   const curPresetW = () => node.widgets?.find((w) => w.name === "style_preset") ?? presetW;
-  const curCanvasW = () => node.widgets?.find((w) => w.name === "canvas") ?? canvasW;
   const curFocusW = () => node.widgets?.find((w) => w.name === "photo_focus") ?? focusW;
+  const curCamPosW = () => node.widgets?.find((w) => w.name === "cam_pos") ?? camPosW;
+  const curCamLocW = () => node.widgets?.find((w) => w.name === "cam_loc") ?? camLocW;
+  const curCamAngleW = () => node.widgets?.find((w) => w.name === "cam_angle") ?? camAngleW;
   const curBypassW = () => node.widgets?.find((w) => w.name === "bypass_boxes") ?? bypassW;
   function findDesc(obj, key) {
     for (let o = obj; o; o = Object.getPrototypeOf(o)) { const d = Object.getOwnPropertyDescriptor(o, key); if (d) return d; }
@@ -1020,36 +1113,28 @@ function setupNode(node) {
     return { v: widgetNum(widget), src: "linked, unresolved" };
   }
   function applyDims(nw, nh) {
-    // Keep each box's offset from the canvas centre. If that would leave the canvas
-    // (1:1 full of boxes -> 9:16), scale the whole set around the centre so nothing leaks.
+    // Dim change: snapshot geom_src for Fit/Stretch; do NOT auto-move boxes.
+    // Boxes stay in the pixel space they were authored in (cdc_boxes_dims) until Fit/Stretch.
     const prev = node.properties.cdc_dims;
-    const pw = Array.isArray(prev) ? prev[0] : 0, ph = Array.isArray(prev) ? prev[1] : 0;
+    const pw = Array.isArray(prev) ? +prev[0] : 0, ph = Array.isArray(prev) ? +prev[1] : 0;
+    const boxSpace = Array.isArray(node.properties.cdc_boxes_dims) ? node.properties.cdc_boxes_dims : null;
+    const aw = boxSpace ? +boxSpace[0] : pw, ah = boxSpace ? +boxSpace[1] : ph;
     if (pw > 0 && ph > 0 && (pw !== nw || ph !== nh) && boxes.length && !drag) {
-      const dx = (nw - pw) / 2, dy = (nh - ph) / 2;
-      const cx = nw / 2, cy = nh / 2;
-      let s = 1;
-      for (const b of boxes) {
-        const x = b.x + dx, y = b.y + dy, w = +b.width, h = +b.height;
-        const ox = x + w / 2 - cx, oy = y + h / 2 - cy;
-        const needX = Math.abs(ox) + w / 2, needY = Math.abs(oy) + h / 2;
-        if (needX > 1e-6 && cx > 0) s = Math.min(s, cx / needX);
-        if (needY > 1e-6 && cy > 0) s = Math.min(s, cy / needY);
+      // Boxes authored at prev canvas size → fresh snapshot (covers post-Fit then new dim change).
+      // Boxes still at an older authored size (dim changed once, no Fit yet) → keep existing geom_src.
+      if (aw === pw && ah === ph) {
+        node.properties.cdc_geom_src = { w: pw, h: ph, boxes: snapBoxes(boxes) };
+      } else {
+        const src = node.properties.cdc_geom_src;
+        const keep = src && +src.w === aw && +src.h === ah && Array.isArray(src.boxes);
+        if (!keep && aw > 0 && ah > 0) {
+          node.properties.cdc_geom_src = { w: aw, h: ah, boxes: snapBoxes(boxes) };
+        }
       }
-      for (const b of boxes) {
-        const x = b.x + dx, y = b.y + dy, w = +b.width, h = +b.height;
-        const bw = w * s, bh = h * s;
-        const ox = (x + w / 2 - cx) * s, oy = (y + h / 2 - cy) * s;
-        b.x = Math.round(cx + ox - bw / 2);
-        b.y = Math.round(cy + oy - bh / 2);
-        b.width = Math.max(1, Math.round(bw));
-        b.height = Math.max(1, Math.round(bh));
-        if (b.x < 0) { b.width += b.x; b.x = 0; }
-        if (b.y < 0) { b.height += b.y; b.y = 0; }
-        if (b.x + b.width > nw) b.width = Math.max(1, nw - b.x);
-        if (b.y + b.height > nh) b.height = Math.max(1, nh - b.y);
-      }
-      const dw = curDataW();
-      if (dw) dw.value = JSON.stringify(boxes);
+      try { syncGeomBtns(); } catch {}
+    } else if (!(pw > 0 && ph > 0)) {
+      // First known size: boxes are authored here.
+      node.properties.cdc_boxes_dims = [nw, nh];
     }
     node.properties.cdc_dims = [nw, nh];
   }
@@ -1062,7 +1147,7 @@ function setupNode(node) {
       const changed = a.v !== eff.w || b.v !== eff.h || a.src !== eff.srcW || b.src !== eff.srcH;
       if (!changed) return;
       const sizeChanged = a.v !== eff.w || b.v !== eff.h;
-      // shift from the last real size only; a guessed size must not move boxes
+      // snapshot geom_src from the last real size only; a guessed size must not snapshot
       const unresolved = /unresolved|pending/.test(a.src + b.src);
       if (sizeChanged && !unresolved) applyDims(a.v, b.v);
       eff = { w: a.v, h: b.v, srcW: a.src, srcH: b.src };
@@ -1091,13 +1176,16 @@ function setupNode(node) {
     }
     migrateDockGeom(node);
     if (!Array.isArray(info?.properties?.cdc_dims)) delete node.properties.cdc_dims; // old workflow: boxes are at saved width/height
+    if (!Array.isArray(node.properties.cdc_boxes_dims) && Array.isArray(node.properties.cdc_dims)) {
+      node.properties.cdc_boxes_dims = [...node.properties.cdc_dims]; // boxes authored at last known canvas size
+    }
     if (node.properties.cdc_follow === undefined) node.properties.cdc_follow = "auto";
     hideWidget(curDataW()); hideWidget(curLastW());
-    for (const w of [curBatchW(), curLatentW(), curPresetW(), curCanvasW(), curBypassW(), curFocusW()]) hideWidget(w);
+    for (const w of [curBatchW(), curLatentW(), curPresetW(), curBypassW(), curFocusW(), curCamPosW(), curCamLocW(), curCamAngleW()]) hideWidget(w);
     boxes = migrateBoxes(parse(curDataW()?.value)); sel = -1;
     { const dw = curDataW(); if (dw && boxes.length) dw.value = JSON.stringify(boxes); } // persist migration
     watchValue(curWidthW()); watchValue(curHeightW()); watchDomInputs();
-    eff = { w: 0, h: 0, srcW: "widget", srcH: "widget" }; // re-resolve; centre-lock only if cdc_dims differs
+    eff = { w: 0, h: 0, srcW: "widget", srcH: "widget" }; // re-resolve; snapshot geom_src if size differs
     // Workflow reload: honour saved dock geometry, then re-place.
     node.properties.cdc_open ??= true;
     try {
@@ -1397,14 +1485,19 @@ function setupNode(node) {
     const r = onExecuted?.apply(this, arguments);
     const d = out?.dims;
     if (Array.isArray(d) && d.length >= 2) { runDims.w = Math.round(+d[0]) || null; runDims.h = Math.round(+d[1]) || null; }
-    resolveDims(); // scale existing boxes first, then (maybe) replace from upstream at run dims
+    resolveDims(); // sync live dims / geom_src, then (maybe) replace boxes from upstream
     if (out?.input_bboxes && out?.upstream_changed?.[0]) {
       boxes = migrateBoxes(JSON.parse(JSON.stringify(out.input_bboxes)), false); sel = -1;
       const lw = curLastW();
       if (lw) lw.value = JSON.stringify(out.input_bboxes);
-      // The replacement boxes are expressed in the backend run dims: re-base the
-      // centre-lock so the next canvas resize shifts from here, not from stale dims.
-      if (runDims.w && runDims.h) node.properties.cdc_dims = [runDims.w, runDims.h];
+      // Replacement boxes are in the backend run dims: re-base authored box space
+      // so the next width/height change snapshots from here for Fit/Stretch.
+      if (runDims.w && runDims.h) {
+        node.properties.cdc_dims = [runDims.w, runDims.h];
+        node.properties.cdc_boxes_dims = [runDims.w, runDims.h];
+        delete node.properties.cdc_geom_src; // fresh boxes at run dims
+        try { syncGeomBtns(); } catch {}
+      }
       commit();
     }
     const im = out?.background_images?.[0];

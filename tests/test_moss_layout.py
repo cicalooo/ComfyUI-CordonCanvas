@@ -93,67 +93,141 @@ def test_layout_input_parses_both_spaces():
     assert find_layout(wrapped)["bbox_coord_space"] == "relative_1000"
 
 
-def test_text_item_caption_quotes_literal():
-    from moss_layout import text_caption
-    layout = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "", "", "none"))
-    t = layout["items"][1]
-    assert t["label"] == "text" and t["text"] == "hello"
-    assert t["caption"] == 'The text "hello".'
-    assert text_caption("bold red letters", "SALE") == 'The text "SALE": bold red letters'
-    assert text_caption("bold red text", "SALE") == 'bold red text, reading "SALE".'
-    assert text_caption('the word "SALE" in red', "SALE") == 'the word "SALE" in red'
-    # idempotent on round-trip
-    once = text_caption("bold red letters", "SALE")
-    assert text_caption(once, "SALE") == once
+def test_text_item_matches_stock():
+    """Stock Create Bounding Boxes / OpenMOSS: caption = desc only; literal in text."""
+    boxes = [
+        {"x": 10, "y": 10, "width": 100, "height": 40,
+         "metadata": {"type": "text", "text": "SALE", "desc": "bold red letters", "palette": []}},
+        {"x": 10, "y": 60, "width": 100, "height": 40,
+         "metadata": {"type": "text", "text": "hello", "desc": "", "palette": []}},
+    ]
+    layout = json.loads(build_native(boxes, [[], []], 1024, 768, "a poster", "", "none"))
+    assert layout["items"][0]["label"] == "text"
+    assert layout["items"][0]["text"] == "SALE"
+    assert layout["items"][0]["caption"] == "bold red letters"
+    assert layout["items"][1]["text"] == "hello"
+    assert layout["items"][1]["caption"] == ""
 
 
 def test_presets_and_legacy_aliases():
     from moss_layout import STYLE_PRESETS, STYLE_PRESET_NAMES, STYLE_PRESET_OPTIONS, LEGACY_PRESET_ALIASES, bake_style
-    assert STYLE_PRESET_NAMES == ["none", "photo", "3d render", "2d art"]
-    for old in ("photoreal", "studio product", "editorial", "analog film", "cinematic still", "illustration", "anime",
-                "oil painting", "watercolor", "pixel art", "poster", "unreal cinematic", "cgi render"):
-        assert old in STYLE_PRESET_OPTIONS and LEGACY_PRESET_ALIASES[old] in STYLE_PRESETS
-        assert bake_style("cap", "", old) == bake_style("cap", "", LEGACY_PRESET_ALIASES[old])
+    assert STYLE_PRESET_NAMES[0] == "none" and STYLE_PRESET_NAMES[1] == "photo"
+    assert set(STYLE_PRESET_NAMES) == {
+        "none", "photo", "film", "cinematic", "studio product", "editorial", "anime",
+        "illustration", "watercolor", "oil painting", "3d render", "pixel art", "poster", "comic", "sketch",
+    }
+    for name, spec in STYLE_PRESETS.items():
+        assert len(spec["meta"]) == 1 and spec["lead"]
+    for old, target in LEGACY_PRESET_ALIASES.items():
+        assert old in STYLE_PRESET_OPTIONS and target in STYLE_PRESETS
+        assert bake_style("cap", "", old) == bake_style("cap", "", target)
+    # first-class presets that used to be aliases
+    for name in ("studio product", "editorial", "anime", "illustration", "cinematic", "film"):
+        assert name in STYLE_PRESETS and name not in LEGACY_PRESET_ALIASES
     layout = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "cap", "", "cgi render"))
     assert layout["summary"]["meta"] == ["3d render"]
 
 
-def test_prefix_leads_and_suffix_follows():
+def test_boxed_caption_untouched_plain_gets_short_lead():
     from moss_layout import STYLE_PRESETS, bake_style
     for name, spec in STYLE_PRESETS.items():
-        cap, tags = bake_style("a cat wearing glasses", "", name)
-        assert cap.startswith(spec["prefix"] + " A cat wearing glasses.")
-        assert cap.endswith(spec["prompt"]) and tags == ", ".join(spec["meta"])
-        assert bake_style(cap, "", name)[0] == cap  # idempotent
-    assert bake_style("a cat", "", "none") == ("a cat", "")
-    assert bake_style("", "", "photo")[0] == STYLE_PRESETS["photo"]["prefix"] + " " + STYLE_PRESETS["photo"]["prompt"]
+        # boxed: user caption only; meta tags from preset
+        cap, tags = bake_style("a cat wearing glasses", "", name, boxed=True)
+        assert cap == "a cat wearing glasses" and tags == ", ".join(spec["meta"])
+        # plain: short medium lead
+        cap, tags = bake_style("a cat wearing glasses", "", name, boxed=False)
+        assert cap == f'{spec["lead"]} A cat wearing glasses' and tags == ", ".join(spec["meta"])
+        assert bake_style(cap, "", name, boxed=False)[0] == cap  # idempotent lead
+    assert bake_style("a cat", "", "none", boxed=False) == ("a cat", "")
+    assert bake_style("a cat", "", "none", boxed=True) == ("a cat", "")
+    assert bake_style("", "", "photo", boxed=False)[0] == STYLE_PRESETS["photo"]["lead"]
+    # boxed build: summary.caption is user only even with photo preset
+    layout = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "a cat", "", "photo"))
+    assert layout["summary"]["caption"] == "a cat"
+    assert layout["summary"]["meta"] == ["photograph"]
 
 
-def test_canvas_mode():
-    for mode in ("single", "multi_panel", "collage"):
-        for fn in (build_native, build_relative):
-            layout = json.loads(fn(_boxes(), [[], [], []], 1024, 768, "cap", "", "photo", mode))
-            assert layout["summary"]["canvas"] == mode
-            assert list(layout["summary"]) == ["meta", "canvas", "caption"]
-    bad = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "cap", "", "none", "bogus"))
-    assert bad["summary"] == {"canvas": "single", "caption": "cap"}
+def test_canvas_always_single():
+    # canvas combo removed; always official default "single". Legacy canvas= kwarg ignored.
+    for fn in (build_native, build_relative):
+        layout = json.loads(fn(_boxes(), [[], [], []], 1024, 768, "cap", "", "photo"))
+        assert layout["summary"]["canvas"] == "single"
+        assert list(layout["summary"]) == ["meta", "canvas", "caption"]
+        legacy = json.loads(fn(_boxes(), [[], [], []], 1024, 768, "cap", "", "photo", canvas="multi_panel"))
+        assert legacy["summary"]["canvas"] == "single"
+    none = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "cap", "", "none"))
+    assert none["summary"] == {"canvas": "single", "caption": "cap"}
 
 
-def test_photo_focus():
-    from moss_layout import PHOTO_FOCUS, PHOTO_SUFFIX_NO_DOF, STYLE_PRESETS, bake_style
-    assert bake_style("a cat", "", "photo", "none") == bake_style("a cat", "", "photo")
+def test_photo_focus_plain_and_boxed_meta():
+    from moss_layout import PHOTO_FOCUS, PHOTO_FOCUS_META, bake_style
+    assert bake_style("a cat", "", "photo", "none", boxed=False) == bake_style("a cat", "", "photo", boxed=False)
     for name, phrase in PHOTO_FOCUS.items():
         if not phrase:
             continue
-        cap, _ = bake_style("a cat wearing glasses", "", "photo", name)
-        assert cap.endswith(f"{PHOTO_SUFFIX_NO_DOF} {phrase}")
-        assert "lens depth of field" not in cap
-        assert bake_style(cap, "", "photo", name)[0] == cap  # idempotent
-        assert bake_style("a cat", "", "photoreal", name)[0] == bake_style("a cat", "", "photo", name)[0]
-        for other in ("3d render", "2d art", "none"):
-            assert bake_style("a cat", "", other, name) == bake_style("a cat", "", other)
-    layout = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "cap", "", "photo", "single", "macro"))
-    assert layout["summary"]["caption"].endswith(PHOTO_FOCUS["macro"])
-    rel = json.loads(build_relative(_boxes(), [[], [], []], 1024, 768, "cap", "", "photo", "single", "macro"))
-    assert rel["summary"]["caption"] == layout["summary"]["caption"]
-    assert build_native([], [], 1024, 768, "cap", "", "photo", "single", "macro").endswith(PHOTO_FOCUS["macro"])
+        meta_tag = PHOTO_FOCUS_META[name]
+        # plain path: lead + caption + focus phrase
+        cap, _ = bake_style("a cat wearing glasses", "", "photo", name, boxed=False)
+        assert cap.startswith("A photograph.")
+        assert cap.endswith(phrase)
+        assert bake_style(cap, "", "photo", name, boxed=False)[0] == cap  # idempotent
+        assert bake_style("a cat", "", "photoreal", name, boxed=False)[0] == bake_style("a cat", "", "photo", name, boxed=False)[0]
+        # boxed path: caption unchanged; short focus tag in meta
+        boxed_cap, tags = bake_style("a cat", "", "photo", name, boxed=True)
+        assert boxed_cap == "a cat" and tags == f"photograph, {meta_tag}"
+        for other in ("3d render", "illustration", "none", "anime"):
+            assert bake_style("a cat", "", other, name, boxed=False) == bake_style("a cat", "", other, boxed=False)
+            bcap, btags = bake_style("a cat", "", other, name, boxed=True)
+            assert bcap == "a cat"
+            assert meta_tag not in btags  # non-photo: no focus meta
+    layout = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "cap", "", "photo", focus="macro"))
+    assert layout["summary"]["caption"] == "cap"
+    assert layout["summary"]["meta"] == ["photograph", "macro"]
+    rel = json.loads(build_relative(_boxes(), [[], [], []], 1024, 768, "cap", "", "photo", focus="macro"))
+    assert rel["summary"]["caption"] == "cap"
+    assert rel["summary"]["meta"] == ["photograph", "macro"]
+    assert build_native([], [], 1024, 768, "cap", "", "photo", focus="macro").endswith(PHOTO_FOCUS["macro"])
+    # anime + shallow: no focus tag
+    anime = json.loads(build_native(_boxes(), [[], [], []], 1024, 768, "a cat", "", "anime", focus="shallow depth of field"))
+    assert anime["summary"]["caption"] == "a cat"
+    assert anime["summary"]["meta"] == ["anime"]
+    # photo + shallow boxed
+    shallow = json.loads(build_native(
+        _boxes(), [[], [], []], 1024, 768, "a cat", "", "photo", focus="shallow depth of field"))
+    assert shallow["summary"] == {
+        "meta": ["photograph", "shallow dof"],
+        "canvas": "single",
+        "caption": "a cat",
+    }
+
+
+def test_camera_boxed_meta_and_plain_phrases():
+    from moss_layout import bake_style, CAM_POS_PLAIN, CAM_LOC_PLAIN, CAM_ANGLE_PLAIN
+    # boxed: caption untouched; meta = preset → focus → cams, max 4 (close-up dropped)
+    cap, tags = bake_style("a cat", "", "photo", "full focus", boxed=True,
+                           cam_pos="low angle", cam_loc="outdoor", cam_angle="close-up")
+    assert cap == "a cat"
+    assert tags == "photograph, deep focus, low angle, outdoor"
+    # no focus: preset + three cams fit exactly
+    cap, tags = bake_style("a cat", "", "photo", boxed=True,
+                           cam_pos="low angle", cam_loc="outdoor", cam_angle="close-up")
+    assert tags.split(", ") == ["photograph", "low angle", "outdoor", "close-up"]
+    # plain: short sentences; focus still photo-only
+    cap, _ = bake_style("a cat", "", "photo", "full focus", boxed=False,
+                        cam_pos="low angle", cam_loc="outdoor", cam_angle="close-up")
+    assert cap.startswith("A photograph.")
+    assert "full focus" in cap.lower() or "f/11" in cap
+    assert CAM_POS_PLAIN["low angle"] in cap
+    assert CAM_LOC_PLAIN["outdoor"] in cap
+    assert CAM_ANGLE_PLAIN["close-up"] in cap
+    assert bake_style(cap, "", "photo", "full focus", boxed=False,
+                      cam_pos="low angle", cam_loc="outdoor", cam_angle="close-up")[0] == cap
+    # build: sample boxed summary — preset + focus + 2 cams (3rd cam truncated)
+    layout = json.loads(build_native(
+        _boxes(), [[], [], []], 1024, 768, "a cat", "", "photo",
+        focus="full focus", cam_pos="low angle", cam_loc="outdoor", cam_angle="close-up"))
+    assert layout["summary"] == {
+        "meta": ["photograph", "deep focus", "low angle", "outdoor"],
+        "canvas": "single",
+        "caption": "a cat",
+    }
