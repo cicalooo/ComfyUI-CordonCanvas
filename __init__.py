@@ -136,7 +136,7 @@ class CordonCanvas(io.ComfyNode):
             description="Classic-frontend canvas editor for bounding boxes. Outputs a preview image, "
                         "pixel-space bounding boxes and prompt elements (same formats as stock Create Bounding Boxes), "
                         "plus MOSS-Image layout JSON. Caption is a multiline input on the node; "
-                        "preset, focus, camera, batch and latent controls live in the editor dock.",
+                        "type/text/desc/colour/preset/focus/camera/batch/latent controls live in the node body panel.",
             inputs=[
                 io.Image.Input("background", optional=True,
                                tooltip="Optional image shown behind the boxes in the editor and preview."),
@@ -151,29 +151,29 @@ class CordonCanvas(io.ComfyNode):
                 io.String.Input("last_incoming", default="", multiline=False, optional=True,
                                 tooltip="Internal: JSON of the upstream bboxes value that last initialized the canvas."),
                 io.Int.Input("batch_size", default=1, min=1, max=4096, optional=True,
-                             tooltip="Batch size of the empty latent output. Edited in the dock."),
+                             tooltip="Batch size of the empty latent output. Edited in the node body panel."),
                 io.Combo.Input("latent_type", options=list(LATENT_TYPES.keys()), default="128ch /16 (MOSS/Flux.2)",
-                               optional=True, tooltip="Channels/downscale of the empty latent output. Edited in the dock."),
+                               optional=True, tooltip="Channels/downscale of the empty latent output. Edited in the node body panel."),
                 io.String.Input("caption", multiline=True, default="", optional=True,
                                 tooltip="Whole-image description for moss_layout (summary.caption). "
                                         "A connected string overrides the widget."),
                 io.Combo.Input("style_preset", options=STYLE_PRESET_OPTIONS, default="photo",
                                tooltip="Boxed layouts: one summary.meta tag (user caption unchanged). No boxes / bypass: short medium lead-in. "
-                                       "Edited in the dock. Legacy names map to current presets."),
+                                       "Edited in the node body panel. Legacy names map to current presets."),
                 io.Combo.Input("photo_focus", options=PHOTO_FOCUS_NAMES, default="none", optional=True,
                                tooltip="Photo preset only: boxed layouts add a short DoF/focus tag to summary.meta "
                                        "(preset → focus → cams, max 4); no-boxes / bypass append a focus sentence. "
-                                       "Never long prose into boxed summary.caption. Edited in the dock."),
+                                       "Never long prose into boxed summary.caption. Edited in the node body panel."),
                 io.Combo.Input("cam_pos", options=CAM_POS_OPTIONS, default="none", optional=True,
-                               tooltip="Camera height/tilt: boxed → summary.meta tag; plain → short sentence. Edited in the dock."),
+                               tooltip="Camera height/tilt: boxed → summary.meta tag; plain → short sentence. Edited in the node body panel."),
                 io.Combo.Input("cam_loc", options=CAM_LOC_OPTIONS, default="none", optional=True,
-                               tooltip="Setting/location: boxed → summary.meta tag; plain → short sentence. Edited in the dock."),
+                               tooltip="Setting/location: boxed → summary.meta tag; plain → short sentence. Edited in the node body panel."),
                 io.Combo.Input("cam_angle", options=CAM_ANGLE_OPTIONS, default="none", optional=True,
-                               tooltip="Framing/angle: boxed → summary.meta tag; plain → short sentence. Edited in the dock."),
+                               tooltip="Framing/angle: boxed → summary.meta tag; plain → short sentence. Edited in the node body panel."),
                 io.Boolean.Input("bypass_boxes", default=False, optional=True,
                                  tooltip="Bypass boxes: caption-only prompt. moss_layout/layout_1000 become plain text "
                                          "(short medium lead + optional photo_focus); bboxes/elements/character_boxes/preview are empty. "
-                                         "Editor boxes are kept. Toggled in the dock."),
+                                         "Editor boxes are kept. Toggled in the editor toolbar."),
             ],
             outputs=[
                 io.Image.Output(display_name="preview"),

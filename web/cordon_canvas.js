@@ -4,12 +4,14 @@ import { initState, applyResize, upscale, uniLoadState, uniRatioSolve, resolutio
 
 const NODE_ID = "CordonCanvas";
 // ---------- canvas-docked editor panel (Kijai-inspired, own implementation) ----------
-// Single mode, persisted per node: the dock lives in graph space under the Cordon node —
-// it moves with the node AND the viewport (part of the canvas), never above ComfyUI chrome.
-// Node drag needs no manual delta math (transform inheritance does it).
+// Docked: attached to the RIGHT edge of the main node; follows the node and viewport.
+// Detached (Undock): free graph-space panel — drag to move; near a node edge it SNAPS
+// flush but stays detached. Only the Dock button re-docks. Never screen-pinned.
 // The editor size is always independent of node.size.
 const CDC_DOCK_MINW = 300, CDC_DOCK_MINH = 340;
 const CDC_TITLE_H = (window.LiteGraph?.NODE_TITLE_HEIGHT ?? 30);
+const CDC_DOCK_GAP = 6; // gap between the main node and the docked editor
+const CDC_SNAP_GAP = 6, CDC_SNAP_TOL = 24;
 const cdcLive = new Set();     // every node with a dock (placement loop + orphan sweep)
 function cdcChain(obj, prop, fn) {
   if (!obj) return;
@@ -30,9 +32,19 @@ function cdcAnchor(n) {
 function cdcPlace(n, rect) {
   const c = app.canvas, fl = n._cdcDock;
   if (!c || !fl) return;
+  if (n.properties?.cdc_detached && n.properties.cdc_freeGraph) {
+    cdcPlaceAbs(n, n.properties.cdc_freeGraph, rect);
+    return;
+  }
   const host = cdcAnchor(n);
   if (!host) return;
-  const gr = n.properties.cdc_dockGraph || (n.properties.cdc_dockGraph = { x: 0, y: (host.size?.[1] ?? 120) + 6, w: 440, h: 560 });
+  const gr = n.properties.cdc_dockGraph || (n.properties.cdc_dockGraph = { x: (host.size?.[0] ?? 280) + CDC_DOCK_GAP, y: 0, w: 440, h: 560 });
+  // Docked = attached to the RIGHT edge of the main node: fixed slot, no free window movement.
+  // Undocked is the only freely moveable state; near an edge it snaps flush but stays detached.
+  if (!n.properties?.cdc_detached) {
+    gr.x = (host.size?.[0] ?? 280) + CDC_DOCK_GAP;
+    gr.y = 0;
+  }
   let hostEl = null;
   if (host.id != null) {
     if (n._cdcHostId !== host.id || !n._cdcHostEl?.isConnected) {
@@ -95,7 +107,7 @@ function cdcTick() {
       const show = n.properties.cdc_open !== false && !n.properties.cdc_min && !!a;
       if (n._cdcDock) n._cdcDock.style.display = show ? "" : "none";
       try {
-        const locked = !!(n.flags && n.flags.pinned);
+        const locked = !!(n.flags && n.flags.pinned) && !n.properties?.cdc_detached;
         n._cdcDock?.classList.toggle("locked", locked);
       } catch {}
       if (a) cdcPlace(n, rect);
@@ -115,10 +127,10 @@ function cdcInstallWakes() {
   _cdcWakes = true;
   cdcChain(c, "onDrawForeground", () => { cdcSweep(); cdcWake(); });
 }
-// Dock geometry setup (per node). The dock is always canvas-docked under the node.
-// Drops legacy floating-mode leftovers (cdc_pinned / cdc_dockRect / cdc_win / cdc_pinVer,
-// bbc_* pin keys) so old saves open docked under the node at their last docked geometry
-// (or the default slot when they never had one).
+// Dock geometry. Docked: attached to the node right edge (node-relative, follows the node).
+// Detached: cdc_detached + absolute cdc_freeGraph (graph space, independent of the node).
+// Drops legacy screen-pinned leftovers (cdc_pinned / cdc_dockRect / cdc_win / cdc_pinVer,
+// bbc_* pin keys) so old saves open docked at the node right edge (size preserved).
 function migrateDockGeom(node) {
   const p = (node.properties ??= {});
   if (p.cdc_dockGraph === undefined && p.bbc_dockGraph !== undefined) {
@@ -135,11 +147,158 @@ function migrateDockGeom(node) {
   }
   const g = p.cdc_dockGraph;
   if (!g || !Number.isFinite(+g.x) || !Number.isFinite(+g.y)) {
-    p.cdc_dockGraph = { x: 0, y: (node.size?.[1] ?? 120) + 6, w: 440, h: 560 };
+    p.cdc_dockGraph = { x: (node.size?.[0] ?? 280) + CDC_DOCK_GAP, y: 0, w: 440, h: 560 };
   } else {
+    // Docked has no free position: always attached to the node right edge (size only persists).
+    g.x = (node.size?.[0] ?? 280) + CDC_DOCK_GAP;
+    g.y = 0;
     g.w = Math.max(CDC_DOCK_MINW, Math.round(+g.w) || 440);
     g.h = Math.max(CDC_DOCK_MINH, Math.round(+g.h) || 560);
   }
+  p.cdc_detached = !!p.cdc_detached;
+  const f = p.cdc_freeGraph;
+  if (p.cdc_detached && f && Number.isFinite(+f.x) && Number.isFinite(+f.y)) {
+    f.x = +f.x; f.y = +f.y;
+    f.w = Math.max(CDC_DOCK_MINW, Math.round(+f.w) || 440);
+    f.h = Math.max(CDC_DOCK_MINH, Math.round(+f.h) || 560);
+  } else if (p.cdc_detached) {
+    p.cdc_detached = false;
+  }
+}
+function cdcHostPos(n) {
+  const host = cdcAnchor(n) || n;
+  return { x: host.pos?.[0] ?? 0, y: host.pos?.[1] ?? 0 };
+}
+function cdcReadAbs(n) {
+  if (n.properties?.cdc_detached && n.properties.cdc_freeGraph) {
+    const f = n.properties.cdc_freeGraph;
+    return {
+      x: +f.x || 0, y: +f.y || 0,
+      w: Math.max(CDC_DOCK_MINW, +f.w || 440),
+      h: Math.max(CDC_DOCK_MINH, +f.h || 560),
+    };
+  }
+  const pos = cdcHostPos(n);
+  const g = n.properties?.cdc_dockGraph || { x: 0, y: 0, w: 440, h: 560 };
+  return {
+    x: pos.x + (+g.x || 0),
+    y: pos.y + (+g.y || 0),
+    w: Math.max(CDC_DOCK_MINW, +g.w || 440),
+    h: Math.max(CDC_DOCK_MINH, +g.h || 560),
+  };
+}
+function cdcDockXY(n) {
+  const host = cdcAnchor(n) || n;
+  return { x: (host.size?.[0] ?? 280) + CDC_DOCK_GAP, y: 0 };
+}
+function cdcWriteAbs(n, abs, opts = {}) {
+  const detached = opts.detached ?? !!n.properties?.cdc_detached;
+  const w = Math.max(CDC_DOCK_MINW, abs.w);
+  const h = Math.max(CDC_DOCK_MINH, abs.h);
+  if (detached) {
+    n.properties.cdc_freeGraph = { x: abs.x, y: abs.y, w, h };
+  } else {
+    // Docked stays attached to the right edge of the node: only size persists, never a free position.
+    const sl = cdcDockXY(n);
+    const g = (n.properties.cdc_dockGraph ??= { x: sl.x, y: sl.y, w, h });
+    g.x = sl.x;
+    g.y = sl.y;
+    g.w = w;
+    g.h = h;
+  }
+  n._cdcSig = "";
+}
+// LiteGraph only: absolute graph rect, drawn with the canvas transform (not screen-pinned).
+function cdcPlaceAbs(n, abs, canvasRect) {
+  const c = app.canvas, fl = n._cdcDock;
+  if (!c?.canvas || !fl || !abs) return;
+  if (fl.parentElement !== document.body) { document.body.appendChild(fl); n._cdcSig = ""; }
+  const ds = c.ds || { scale: 1, offset: [0, 0] };
+  const scale = ds.scale || 1;
+  canvasRect = canvasRect || c.canvas.getBoundingClientRect();
+  const off = ds.offset || [0, 0];
+  const bx = canvasRect.left + (abs.x + off[0]) * scale;
+  const by = canvasRect.top + (abs.y + off[1]) * scale;
+  const tf = `translate(${Math.round(bx)}px,${Math.round(by)}px) scale(${scale})`;
+  const sig = `a|${tf}|${Math.round(abs.w)}|${Math.round(abs.h)}`;
+  if (n._cdcSig !== sig) {
+    fl.style.position = "fixed";
+    fl.style.transformOrigin = "top left";
+    fl.style.transform = tf;
+    fl.style.zIndex = "";
+    fl.style.left = "0";
+    fl.style.top = "0";
+    fl.style.width = Math.round(abs.w) + "px";
+    fl.style.height = Math.round(abs.h) + "px";
+    n._cdcSig = sig;
+  }
+}
+function cdcNodeEdges(n) {
+  const host = cdcAnchor(n) || n;
+  const titleH = window.LiteGraph?.NODE_TITLE_HEIGHT ?? CDC_TITLE_H;
+  const px = host.pos?.[0] ?? 0, py = host.pos?.[1] ?? 0;
+  const nw = host.size?.[0] ?? 0, nh = host.size?.[1] ?? 0;
+  let L = px, T = py - titleH, R = px + nw, B = py + nh;
+  try {
+    const b = host.getBounding?.();
+    if (b && Number.isFinite(b[2]) && b[2] > 1 && Number.isFinite(b[3]) && b[3] > 1) {
+      L = b[0]; T = b[1]; R = b[0] + b[2]; B = b[1] + b[3];
+    }
+  } catch {}
+  return { L, T, R, B };
+}
+function cdcClientToGraph(clientX, clientY) {
+  const c = app.canvas;
+  if (!c?.canvas || !c.ds) return null;
+  const scale = c.ds.scale || 1;
+  const rect = c.canvas.getBoundingClientRect();
+  const off = c.ds.offset || [0, 0];
+  return {
+    x: (clientX - rect.left) / scale - off[0],
+    y: (clientY - rect.top) / scale - off[1],
+    scale,
+  };
+}
+// Single nearest edge. Only the perpendicular axis moves; along-edge stays at the pointer.
+function cdcNearestEdge(n, panel, scale, pointer) {
+  const tol = CDC_SNAP_TOL / (scale || 1);
+  const e = cdcNodeEdges(n);
+  const gap = CDC_SNAP_GAP;
+  const overlapY = panel.y < e.B + tol && panel.y + panel.h > e.T - tol;
+  const overlapX = panel.x < e.R + tol && panel.x + panel.w > e.L - tol;
+  const cands = [];
+  if (overlapY) {
+    cands.push({ edge: "left", dist: Math.abs(panel.x + panel.w + gap - e.L) });
+    cands.push({ edge: "right", dist: Math.abs(panel.x - (e.R + gap)) });
+  }
+  if (overlapX) {
+    cands.push({ edge: "top", dist: Math.abs(panel.y + panel.h + gap - e.T) });
+    cands.push({ edge: "bottom", dist: Math.abs(panel.y - (e.B + gap)) });
+  }
+  const pdist = (edge) => {
+    if (!pointer) return 0;
+    if (edge === "left") return Math.abs(pointer.x - e.L);
+    if (edge === "right") return Math.abs(pointer.x - e.R);
+    if (edge === "top") return Math.abs(pointer.y - e.T);
+    return Math.abs(pointer.y - e.B);
+  };
+  let best = null;
+  for (const c of cands) {
+    if (c.dist > tol) continue;
+    if (!best || c.dist < best.dist - 1 || (Math.abs(c.dist - best.dist) <= 1 && pdist(c.edge) < pdist(best.edge))) best = c;
+  }
+  if (!best) return null;
+  const rect = { x: panel.x, y: panel.y, w: panel.w, h: panel.h };
+  if (best.edge === "left") rect.x = e.L - gap - panel.w;
+  else if (best.edge === "right") rect.x = e.R + gap;
+  else if (best.edge === "top") rect.y = e.T - gap - panel.h;
+  else rect.y = e.B + gap;
+  return { edge: best.edge, rect };
+}
+function cdcSetSnapClass(el, edge) {
+  if (!el) return;
+  el.classList.remove("snap", "snap-left", "snap-right", "snap-top", "snap-bottom");
+  if (edge) el.classList.add("snap-" + edge);
 }
 function cdcDrag(e, target, onMove, onEnd) {
   try { target.setPointerCapture(e.pointerId); } catch {}
@@ -165,6 +324,7 @@ function cdcInjectCSS() {
       min-width:${CDC_DOCK_MINW}px; min-height:${CDC_DOCK_MINH}px; overflow:hidden; pointer-events:auto; box-sizing:border-box; }
     .cdc-head { flex:0 0 auto; display:flex; align-items:center; gap:6px; padding:4px 8px;
       background:#2a2a2a; cursor:move; user-select:none; border-bottom:1px solid #444; font:12px sans-serif; color:#ccc; }
+    .cdc-dock.docked .cdc-head { cursor:default; }
     .cdc-head .cdc-btn { background:#333; border:1px solid #555; border-radius:4px; color:#bbb;
       font:11px sans-serif; cursor:pointer; padding:1px 7px; line-height:16px; white-space:nowrap; }
     .cdc-head .cdc-btn:hover { border-color:#7a5; color:#fff; }
@@ -190,7 +350,15 @@ function cdcInjectCSS() {
     .cdc-rsz.nw { top:0; left:0; width:12px; height:12px; cursor:nwse-resize; }
     .cdc-rsz.se { bottom:0; right:0; width:12px; height:12px; cursor:nwse-resize; }
     .cdc-rsz.sw { bottom:0; left:0; width:12px; height:12px; cursor:nesw-resize; }
-    .cdc-dock.snap { box-shadow:0 -3px 0 0 #7a5, 0 8px 30px rgba(0,0,0,0.55); }
+    .cdc-dock.snap-left { box-shadow:-3px 0 0 0 #7a5, 0 8px 30px rgba(0,0,0,0.55); }
+    .cdc-dock.snap-right { box-shadow:3px 0 0 0 #7a5, 0 8px 30px rgba(0,0,0,0.55); }
+    .cdc-dock.snap-top { box-shadow:0 -3px 0 0 #7a5, 0 8px 30px rgba(0,0,0,0.55); }
+    .cdc-dock.snap-bottom { box-shadow:0 3px 0 0 #7a5, 0 8px 30px rgba(0,0,0,0.55); }
+    .cdc-dock.docked .cdc-rsz.n, .cdc-dock.docked .cdc-rsz.ne, .cdc-dock.docked .cdc-rsz.nw { display:none; }
+    .cdc-props, .cdc-props * { box-sizing:border-box; }
+    .cdc-props select, .cdc-props textarea, .cdc-props input { min-width:0; max-width:100%; }
+    .cdc-props textarea { width:100%; }
+    .cdc-props select { text-overflow:ellipsis; overflow:hidden; }
   `;
   document.head.appendChild(s);
 }
@@ -263,11 +431,28 @@ function setupNode(node) {
   const W = (n) => node.widgets?.find((w) => w.name === n);
   const dataW = W("box_data"), lastW = W("last_incoming"), widthW = W("width"), heightW = W("height");
   hideWidget(dataW); hideWidget(lastW);
-  // batch/latent/preset live in the dock (keeps the node body small); hidden on the node itself.
-  // caption lives on the node itself (multiline widget / linkable input) — not duplicated in the dock.
+  // caption (User Prompt) is a normal in-node widget: textarea + linkable slot, like width/height.
+  // (A slot-only dot is not viable: hidden widgets are excluded from layout, so the
+  // widget-backed slot loses its row position and overlaps the top slots.)
+  // type/text/desc/colour/preset/focus/camera/batch/latent live in the node-body props panel below.
   const batchW = W("batch_size"), latentW = W("latent_type"), presetW = W("style_preset"), bypassW = W("bypass_boxes"), focusW = W("photo_focus");
   const camPosW = W("cam_pos"), camLocW = W("cam_loc"), camAngleW = W("cam_angle");
   for (const w of [batchW, latentW, presetW, bypassW, focusW, camPosW, camLocW, camAngleW]) hideWidget(w);
+
+  // Live widget lookups — MUST be declared before latentDs/baseHint/syncGen (those close over them).
+  // Re-find on each call so recreate/reload still works.
+  const curWidthW = () => node.widgets?.find((w) => w.name === "width") ?? widthW;
+  const curHeightW = () => node.widgets?.find((w) => w.name === "height") ?? heightW;
+  const curDataW = () => node.widgets?.find((w) => w.name === "box_data") ?? dataW;
+  const curLastW = () => node.widgets?.find((w) => w.name === "last_incoming") ?? lastW;
+  const curBatchW = () => node.widgets?.find((w) => w.name === "batch_size") ?? batchW;
+  const curLatentW = () => node.widgets?.find((w) => w.name === "latent_type") ?? latentW;
+  const curPresetW = () => node.widgets?.find((w) => w.name === "style_preset") ?? presetW;
+  const curFocusW = () => node.widgets?.find((w) => w.name === "photo_focus") ?? focusW;
+  const curCamPosW = () => node.widgets?.find((w) => w.name === "cam_pos") ?? camPosW;
+  const curCamLocW = () => node.widgets?.find((w) => w.name === "cam_loc") ?? camLocW;
+  const curCamAngleW = () => node.widgets?.find((w) => w.name === "cam_angle") ?? camAngleW;
+  const curBypassW = () => node.widgets?.find((w) => w.name === "bypass_boxes") ?? bypassW;
 
   let boxes = migrateBoxes(parse(dataW?.value));
   let sel = -1, drag = null, bgImg = null, upInfo = null; // upInfo: {url, entry, state} from the upstream chain
@@ -368,71 +553,129 @@ function setupNode(node) {
     }
     upSig = ""; refreshUpstream();
   }
-  // Fit / Stretch remap from cdc_geom_src (boxes+dims at the size they were authored).
-  // Dim changes do NOT auto-move boxes — only snapshot geom_src — so Fit/Stretch are the
-  // explicit remaps. Revert undoes the last Fit/Stretch (one level).
+  // Fit / Stretch always target CURRENT width×height (dims()).
+  // geom_src = authored boxes+dims (snapshotted on dim change, or synthesized on click).
+  // Fit: uniform scale of the box-union so the layout letterboxes into the current canvas
+  //      (centred; fills the limiting axis — visibly grows/shrinks with canvas vs footprint).
+  // Stretch: anisotropic map x*(W/Ws), y*(H/Hs) from authored canvas to current.
+  // Revert: one-level undo of the last Fit/Stretch.
   const snapBoxes = (list) => JSON.parse(JSON.stringify(list || []));
   const syncGeomBtns = () => {
-    const hasSrc = Array.isArray(node.properties.cdc_geom_src?.boxes) && node.properties.cdc_geom_src.w > 0;
+    const canRemap = boxes.length > 0 || (Array.isArray(node.properties.cdc_geom_src?.boxes) && node.properties.cdc_geom_src.boxes.length > 0);
     const hasUndo = Array.isArray(node.properties.cdc_geom_undo?.boxes);
-    fitBtn.disabled = !hasSrc; stretchBtn.disabled = !hasSrc; revertBtn.disabled = !hasUndo;
-    fitBtn.style.opacity = hasSrc ? 1 : 0.4; stretchBtn.style.opacity = hasSrc ? 1 : 0.4;
+    fitBtn.disabled = !canRemap; stretchBtn.disabled = !canRemap; revertBtn.disabled = !hasUndo;
+    fitBtn.style.opacity = canRemap ? 1 : 0.4; stretchBtn.style.opacity = canRemap ? 1 : 0.4;
     revertBtn.style.opacity = hasUndo ? 1 : 0.4;
   };
   const pushGeomUndo = () => {
-    // Snapshot boxes in the space they are currently authored in (may differ from live dims
-    // after a size change and before Fit/Stretch).
     const bs = node.properties.cdc_boxes_dims;
     const [cw, ch] = dims();
     const w = Array.isArray(bs) && bs[0] > 0 ? +bs[0] : cw;
     const h = Array.isArray(bs) && bs[1] > 0 ? +bs[1] : ch;
     node.properties.cdc_geom_undo = { w, h, boxes: snapBoxes(boxes) };
   };
+  // Clamp into canvas; never leave x/y off-canvas (that made Stretch "vanish" boxes).
   const clipBox = (b, nw, nh) => {
-    let x = Math.round(+b.x), y = Math.round(+b.y), w = Math.max(1, Math.round(+b.width)), h = Math.max(1, Math.round(+b.height));
+    let x = Math.round(+b.x) || 0, y = Math.round(+b.y) || 0;
+    let w = Math.max(1, Math.round(+b.width) || 1), h = Math.max(1, Math.round(+b.height) || 1);
     if (x < 0) { w += x; x = 0; } if (y < 0) { h += y; y = 0; }
-    if (x + w > nw) w = Math.max(1, nw - x); if (y + h > nh) h = Math.max(1, nh - y);
+    if (w < 1) w = 1; if (h < 1) h = 1;
+    if (x >= nw) { x = Math.max(0, nw - 1); w = 1; }
+    if (y >= nh) { y = Math.max(0, nh - 1); h = 1; }
+    if (x + w > nw) w = Math.max(1, nw - x);
+    if (y + h > nh) h = Math.max(1, nh - y);
     return { x, y, width: Math.max(1, w), height: Math.max(1, h), metadata: b.metadata };
   };
-  const remapFromSrc = (mode) => {
+  /** Authored geometry to remap from. Prefer pending geom_src; else boxes + cdc_boxes_dims/current. */
+  const resolveGeomSrc = () => {
     const src = node.properties.cdc_geom_src;
-    if (!src || !(src.w > 0) || !(src.h > 0) || !Array.isArray(src.boxes)) {
-      flash("Fit/Stretch need a previous size — change width/height first, then Fit or Stretch");
-      return;
+    if (src && +src.w > 0 && +src.h > 0 && Array.isArray(src.boxes) && src.boxes.length) {
+      return { w: +src.w, h: +src.h, boxes: src.boxes };
     }
-    const [nw, nh] = dims();
-    pushGeomUndo();
+    const [cw, ch] = dims();
+    const bs = node.properties.cdc_boxes_dims;
+    const sw = Array.isArray(bs) && +bs[0] > 0 ? +bs[0] : cw;
+    const sh = Array.isArray(bs) && +bs[1] > 0 ? +bs[1] : ch;
+    if (!(sw > 0) || !(sh > 0) || !boxes.length) return null;
+    const made = { w: sw, h: sh, boxes: snapBoxes(boxes) };
+    node.properties.cdc_geom_src = made; // persist so Fit/Stretch share one authored source
+    return made;
+  };
+  /** Pure remap (mirrored in tests/test_geom_remap.mjs). Stretch ≠ Fit. */
+  const remapBoxes = (srcBoxes, sw, sh, nw, nh, mode) => {
     const out = [];
+    const Ws = Math.max(1, +sw || 1), Hs = Math.max(1, +sh || 1);
+    const W = Math.max(1, +nw || 1), H = Math.max(1, +nh || 1);
     if (mode === "stretch") {
-      const sx = nw / src.w, sy = nh / src.h;
-      for (const b of src.boxes) out.push(clipBox({ ...b, x: b.x * sx, y: b.y * sy, width: b.width * sx, height: b.height * sy }, nw, nh));
-    } else {
-      // letterbox: uniform scale of the previous canvas into the new one, centred (same as bg overlay)
-      const sc = Math.min(nw / src.w, nh / src.h);
-      const ox = (nw - src.w * sc) / 2, oy = (nh - src.h * sc) / 2;
-      for (const b of src.boxes) out.push(clipBox({ ...b, x: ox + b.x * sc, y: oy + b.y * sc, width: b.width * sc, height: b.height * sc }, nw, nh));
+      // Anisotropic only — NEVER Fit's union letterbox sc=min(...).
+      const sx = W / Ws, sy = H / Hs;
+      for (const b of srcBoxes) {
+        const bw = Math.max(0, +b.width || 0), bh = Math.max(0, +b.height || 0);
+        out.push(clipBox({
+          ...b,
+          x: (+b.x || 0) * sx,
+          y: (+b.y || 0) * sy,
+          width: Math.max(1, bw * sx),
+          height: Math.max(1, bh * sy),
+        }, W, H));
+      }
+      return out;
     }
-    boxes = out; sel = Math.min(sel, boxes.length - 1);
+    // Fit: uniform letterbox of the BOX UNION into the current canvas (not Stretch).
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const b of srcBoxes) {
+      minX = Math.min(minX, +b.x || 0); minY = Math.min(minY, +b.y || 0);
+      maxX = Math.max(maxX, (+b.x || 0) + (+b.width || 0)); maxY = Math.max(maxY, (+b.y || 0) + (+b.height || 0));
+    }
+    if (!Number.isFinite(minX)) return out;
+    const uw = Math.max(1, maxX - minX), uh = Math.max(1, maxY - minY);
+    const sc = Math.min(W / uw, H / uh);
+    const ucx = (minX + maxX) / 2, ucy = (minY + maxY) / 2;
+    const ncx = W / 2, ncy = H / 2;
+    for (const b of srcBoxes) {
+      const cx = (+b.x || 0) + (+b.width || 0) / 2, cy = (+b.y || 0) + (+b.height || 0) / 2;
+      const nw_ = Math.max(1, (+b.width || 0) * sc), nh_ = Math.max(1, (+b.height || 0) * sc);
+      out.push(clipBox({
+        ...b,
+        x: ncx + (cx - ucx) * sc - nw_ / 2,
+        y: ncy + (cy - ucy) * sc - nh_ / 2,
+        width: nw_, height: nh_,
+      }, W, H));
+    }
+    return out;
+  };
+  const remapFromSrc = (mode) => {
+    const src = resolveGeomSrc();
+    if (!src) { flash("Fit/Stretch need at least one box"); return; }
+    const [nw, nh] = dims(); // always current canvas widgets / resolved size
+    if (!(nw > 0) || !(nh > 0)) { flash("Fit/Stretch: current canvas size unknown"); return; }
+    if (!(src.w > 0) || !(src.h > 0)) { flash("Fit/Stretch: authored size missing"); return; }
+    pushGeomUndo();
+    boxes = remapBoxes(src.boxes, src.w, src.h, nw, nh, mode);
+    sel = Math.min(sel, boxes.length - 1);
     node.properties.cdc_boxes_dims = [nw, nh]; // boxes now live in current canvas space
+    // Keep geom_src as the authored source so Fit ↔ Stretch can be re-tried; Revert uses undo.
     commit(); syncGeomBtns();
-    flash(mode === "stretch"
-      ? `stretch: remapped from ${src.w}×${src.h} → ${nw}×${nh} (independent X/Y)`
-      : `fit: remapped from ${src.w}×${src.h} → ${nw}×${nh} (uniform, letterboxed)`);
+    if (mode === "stretch") {
+      const sx = (nw / src.w).toFixed(3), sy = (nh / src.h).toFixed(3);
+      flash(`stretch: ${src.w}×${src.h} → ${nw}×${nh} (sx=${sx}, sy=${sy})`);
+    } else {
+      flash(`fit: layout → ${nw}×${nh} (uniform letterbox to current canvas)`);
+    }
   };
   const revertGeom = () => {
     const u = node.properties.cdc_geom_undo;
     if (!u || !Array.isArray(u.boxes)) { flash("nothing to revert"); return; }
     boxes = snapBoxes(u.boxes); sel = Math.min(sel, boxes.length - 1);
-    // undo restores boxes as they were (in current canvas space, pre-remap)
     node.properties.cdc_boxes_dims = [u.w, u.h];
     delete node.properties.cdc_geom_undo;
     commit(); syncGeomBtns();
     flash(`reverted to pre-Fit/Stretch boxes (${u.w}×${u.h})`);
   };
   const fitBtn = btn("⊡ fit", () => remapFromSrc("fit"),
-    "Fit: remap boxes from the size before the last width/height change with uniform letterbox scale (centred), like fitting the old canvas into the new one. Dim changes no longer move boxes automatically.");
+    "Fit: uniformly scale the box layout so it letterboxes into the CURRENT canvas (centred; fills the limiting axis). Uses authored geom_src (or current boxes). Dim changes alone do not move boxes.");
   const stretchBtn = btn("⤢ stretch", () => remapFromSrc("stretch"),
-    "Stretch: remap boxes from the size before the last width/height change, scaling X and Y independently to the new canvas.");
+    "Stretch: map authored boxes onto the CURRENT canvas with independent X/Y scales (x·W/Ws, y·H/Hs). Caps inside the canvas.");
   const revertBtn = btn("↶ revert", () => revertGeom(),
     "Revert: undo the last Fit or Stretch (one level). Disabled when empty.");
 
@@ -445,7 +688,8 @@ function setupNode(node) {
   syncOvBtn();
   syncGeomBtns();
   let flashTimer = null;
-  const HINT_OPS = "drag: new/move/resize · Shift/Ctrl+drag: new box over others · Alt+click: cycle overlapping · Del/right-click: remove · Esc: deselect · Fit/Stretch: remap boxes after width/height change · Revert: undo Fit/Stretch · wheel: zoom · middle/Space+drag: pan · dbl-click empty: fit · Ctrl+wheel: graph zoom";
+  // Static click guide lives on the main node body (see cordon_guide below).
+  // Detached editor status line: dims / selection / bypass / flash confirmations only.
   const baseHint = () => {
     const [dw, dh] = dims();
     const srcs = [...new Set([eff.srcW, eff.srcH])].filter((x) => x !== "widget");
@@ -456,59 +700,60 @@ function setupNode(node) {
     return `${dw}×${dh}${srcs.length ? ` (${srcs.join("/")})` : ""} · ${boxes.length} box${boxes.length === 1 ? "" : "es"}` + (sel >= 0 ? ` · #${sel + 1}` : "")
       + (() => { const c = boxes.map((b, i) => (b.metadata?.character && b.metadata?.type !== "text" ? i + 1 : 0)).filter(Boolean); return c.length ? ` · ★ ${c.join(", ")}` : ""; })()
       + frameWarn
-      + (bypassOn() ? " · ⊘ boxes bypassed: caption-only prompt" : "")
-      + ` · ${HINT_OPS}`;
+      + (bypassOn() ? " · ⊘ boxes bypassed: caption-only prompt" : "");
   };
-  const hint = el("div", { textContent: HINT_OPS },
-    { flex: "0 0 auto", fontSize: "10px", opacity: 0.55, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" });
-  const flash = (msg) => { hint.textContent = msg; hint.style.opacity = 0.95; clearTimeout(flashTimer); flashTimer = setTimeout(() => { hint.textContent = baseHint(); hint.style.opacity = 0.55; flashTimer = null; }, 4000); };
+  const hint = el("div", { textContent: baseHint() },
+    { flex: "0 0 auto", fontSize: "11px", lineHeight: "1.45", opacity: 0.75, whiteSpace: "normal", overflow: "hidden",
+      wordBreak: "break-word", minHeight: "32px", maxHeight: "34px", display: "-webkit-box",
+      WebkitLineClamp: "2", WebkitBoxOrient: "vertical" });
+  const flash = (msg) => { hint.textContent = msg; hint.style.opacity = 0.95; clearTimeout(flashTimer); flashTimer = setTimeout(() => { hint.textContent = baseHint(); hint.style.opacity = 0.75; flashTimer = null; }, 4000); };
   // flex-basis 0 + min sizes 0: the wrap's size never depends on the canvas inside it (no feedback loop)
   const wrap = el("div", {}, { flex: "1 1 0", minHeight: "60px", minWidth: "0", position: "relative", overflow: "hidden" });
   const canvas = el("canvas", { tabIndex: 0 }, { outline: "none", cursor: "crosshair", background: "#202020",
     position: "absolute", left: "0px", top: "0px", maxWidth: "none", maxHeight: "none" });
   wrap.append(canvas);
 
-  const panel = el("div", {}, { flex: "0 0 auto", display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 6px", alignItems: "center" });
-  const inStyle = { background: "#222", color: "#ddd", border: "1px solid #555", borderRadius: "3px", padding: "1px 4px", minWidth: 0 };
+  const panel = el("div", {}, { flex: "0 0 auto", display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", gap: "3px 6px", alignItems: "center", minWidth: 0, maxWidth: "100%" });
+  const inStyle = { background: "#222", color: "#ddd", border: "1px solid #555", borderRadius: "3px", padding: "1px 4px", minWidth: 0, maxWidth: "100%", boxSizing: "border-box" };
   const typeSel = el("select", {}, inStyle);
   for (const t of ["obj", "text"]) typeSel.append(el("option", { value: t, textContent: t }));
-  const textIn = el("textarea", { rows: 2, placeholder: "rendered text (type=text). Real newlines are kept." }, { ...inStyle, resize: "vertical" });
-  const descIn = el("textarea", { rows: 2, placeholder: "description" }, { ...inStyle, resize: "none" });
+  const textIn = el("textarea", { rows: 2, placeholder: "rendered text (type=text). Real newlines are kept." }, { ...inStyle, resize: "vertical", width: "100%" });
+  const descIn = el("textarea", { rows: 2, placeholder: "description" }, { ...inStyle, resize: "vertical", width: "100%" });
   const swatch = { width: "28px", height: "20px", padding: 0, border: "none", background: "none" };
   // display colour: editor/preview only, never in prompt elements
   const dispIn = el("input", { type: "color", title: "Box colour in the editor/preview (not sent to the prompt)" }, swatch);
-  const dispRow = el("div", {}, { display: "flex", gap: "6px", alignItems: "center" });
+  const dispRow = el("div", {}, { display: "flex", gap: "6px", alignItems: "center", minWidth: 0, maxWidth: "100%", overflow: "hidden" });
   const usePal = el("input", { type: "checkbox", title: "Send a colour palette for this box to the prompt (color_palette)" });
   const usePalLab = el("label", {}, { display: "flex", gap: "3px", alignItems: "center", cursor: "pointer" });
   usePalLab.append(usePal, el("span", { textContent: "use colour palette in prompt" }));
   dispRow.append(dispIn, el("span", { textContent: "box colour" }, { opacity: 0.6 }), usePalLab);
-  const palRow = el("div", {}, { display: "none", gap: "4px" });
+  const palRow = el("div", {}, { display: "none", gap: "4px", minWidth: 0, maxWidth: "100%" });
   const colorIn = el("input", { type: "color", title: "First prompt palette colour" }, swatch);
   const palIn = el("input", { type: "text", placeholder: "prompt colours: #RRGGBB, #RRGGBB … (max 5)" }, { ...inStyle, flex: 1 });
   palRow.append(colorIn, palIn);
   const charIn = el("input", { type: "checkbox", title: "Label this box as a character for MOSS (adds its number to the character_boxes output)" });
   const charLab = el("label", {}, { display: "flex", gap: "3px", alignItems: "center", cursor: "pointer" });
   charLab.append(charIn, el("span", { textContent: "★ character" }));
-  const typeRow = el("div", {}, { display: "flex", gap: "8px", alignItems: "center" });
+  const typeRow = el("div", {}, { display: "flex", gap: "8px", alignItems: "center", minWidth: 0, maxWidth: "100%", overflow: "hidden" });
   typeRow.append(typeSel, charLab);
   const lab = (t) => el("span", { textContent: t }, { opacity: 0.8 });
   const palLab = lab("palette");
   panel.append(lab("type"), typeRow, lab("text"), textIn, lab("desc"), descIn, lab("colour"), dispRow, palLab, palRow);
-  // dock-only controls (preset/batch/latent) live here so the node body stays small.
-  // caption is NOT duplicated here: it lives on the node itself. Only per-box
-  // descriptions (text/desc in the panel above) live in this editor.
+  // prompt controls (preset/batch/latent) live in the node-body panel with the per-box fields.
+  // caption (User Prompt) is a normal in-node widget (textarea + slot). Only per-box
+  // descriptions (text/desc) are edited per selection.
   const comboOpts = (w) => {
     const o = w?.options;
     if (Array.isArray(o)) return o;
     if (o && Array.isArray(o.values)) return o.values;
     return [];
   };
-  const genDiv = el("div", {}, { flex: "0 0 auto", display: "grid", gridTemplateColumns: "auto 1fr", gap: "3px 6px", alignItems: "center",
-    borderTop: "1px solid #333", paddingTop: "4px" });
+  const genDiv = el("div", {}, { flex: "0 0 auto", display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", gap: "3px 6px", alignItems: "center",
+    borderTop: "1px solid #333", paddingTop: "4px", minWidth: 0, maxWidth: "100%" });
   const presetSel = el("select", { title: "Style preset: baked into the prompt caption" }, inStyle);
-  const batchIn = el("input", { type: "number", min: 1, max: 4096, step: 1, title: "Batch size of the empty latent output" }, { ...inStyle, width: "64px" });
+  const batchIn = el("input", { type: "number", min: 1, max: 4096, step: 1, title: "Batch size of the empty latent output" }, { ...inStyle, width: "64px", flex: "0 0 auto" });
   const latentSel = el("select", { title: "Channels/downscale of the empty latent output" }, { ...inStyle, flex: 1 });
-  const batchLatRow = el("div", {}, { display: "flex", gap: "6px", alignItems: "center" });
+  const batchLatRow = el("div", {}, { display: "flex", gap: "6px", alignItems: "center", minWidth: 0, maxWidth: "100%", overflow: "hidden" });
   batchLatRow.append(batchIn, latentSel);
   const presetLab = lab("preset"), batchLatLab = lab("batch·lat");
   const focusSel = el("select", { title: "Photo preset only: boxed → short DoF meta tag; plain/bypass → focus sentence" }, inStyle);
@@ -519,11 +764,11 @@ function setupNode(node) {
   const camPosLab = el("span", { textContent: "cam pos" }, { opacity: 0.75, fontSize: "11px", whiteSpace: "nowrap" });
   const camLocLab = el("span", { textContent: "cam loc" }, { opacity: 0.75, fontSize: "11px", whiteSpace: "nowrap" });
   const camAngleLab = el("span", { textContent: "angle" }, { opacity: 0.75, fontSize: "11px", whiteSpace: "nowrap" });
-  const camRow = el("div", {}, { display: "flex", gap: "4px", alignItems: "center", gridColumn: "1 / -1" });
-  const camPair = (l, s) => { const d = el("div", {}, { display: "flex", flexDirection: "column", gap: "1px", flex: 1, minWidth: 0 }); d.append(l, s); return d; };
+  const camRow = el("div", {}, { display: "flex", gap: "4px", alignItems: "center", gridColumn: "1 / -1", minWidth: 0, maxWidth: "100%", overflow: "hidden" });
+  const camPair = (l, s) => { const d = el("div", {}, { display: "flex", flexDirection: "column", gap: "1px", flex: 1, minWidth: 0, maxWidth: "100%", overflow: "hidden" }); d.append(l, s); return d; };
   camRow.append(camPair(camPosLab, camPosSel), camPair(camLocLab, camLocSel), camPair(camAngleLab, camAngleSel));
   genDiv.append(presetLab, presetSel, focusLab, focusSel, camRow, batchLatLab, batchLatRow);
-  root.append(bar, hint, wrap, panel, genDiv);
+  root.append(bar, hint, wrap); // dock keeps toolbar + 2-line status + canvas only; panel/genDiv move to the node-body props widget below
 
   const fillSel = (sel, opts, cur) => {
     const list = opts.length ? opts : (cur != null ? [cur] : ["none"]);
@@ -598,7 +843,7 @@ function setupNode(node) {
     palRow.style.display = showPal ? "flex" : "none"; palLab.style.display = showPal ? "" : "none";
     palIn.value = (m?.palette || []).join(", "); colorIn.value = (m?.palette?.[0] || boxColor(sel)).slice(0, 7);
     textIn.style.opacity = m?.type === "text" ? 1 : 0.5;
-    if (!flashTimer) hint.textContent = baseHint();
+    if (!flashTimer) { hint.textContent = baseHint(); hint.style.opacity = 0.75; }
     syncGen();
   }
   const boxColor = (i) => { const m = boxes[i]?.metadata; return (isHex(m?.display_color) && m.display_color) || COLORS[Math.max(0, i) % COLORS.length]; };
@@ -822,10 +1067,10 @@ function setupNode(node) {
   }, { passive: false });
 
   // ---------- docked editor (canvas + prompt fields), Kijai-style, own code ----------
-  // Always canvas-docked under the node — follows node drag AND viewport as part of
-  // the canvas, at the node z-layer (never above menus/dialogs). Drag the title bar
-  // to move it; near any node edge it snaps flush to that edge, in place.
-  // The editor size is independent of node.size.
+  // LiteGraph only. Docked: attached to the node right edge in graph space. Detached:
+  // absolute graph coords, pans/zooms with the canvas, does not follow the node.
+  // Dropping a detached dock near an edge only snaps it flush (stays detached);
+  // only the Dock button re-docks. Never screen-pinned.
   cdcInjectCSS();
   migrateDockGeom(node);
   node.properties.cdc_open ??= true;
@@ -834,10 +1079,11 @@ function setupNode(node) {
   const head = el("div", { className: "cdc-head" }, {});
   const titleText = el("span", { textContent: "Cordon Canvas" }, { flex: "1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
   const minBtn = el("button", { className: "cdc-btn", textContent: "—", title: "Minimize editor" }, {});
+  const detachBtn = el("button", { className: "cdc-btn", textContent: "Undock", title: "Undock editor to move it freely (snaps to node edges, stays detached)" }, {});
   const closeBtn = btn("✕", () => setOpen(false, true));
   closeBtn.className = "cdc-btn";
   closeBtn.title = "Hide editor window";
-  head.append(titleText, minBtn, closeBtn);
+  head.append(titleText, detachBtn, minBtn, closeBtn);
   const body = el("div", { className: "cdc-body" }, {});
   root.style.flex = "1 1 auto";
   root.style.minHeight = "0";
@@ -858,18 +1104,25 @@ function setupNode(node) {
     if (inp && document.activeElement === inp && (inp.tagName === "SELECT" || inp.type === "number")) e.stopPropagation();
   }, { passive: true });
   dock.addEventListener("pointerdown", () => { titleText.textContent = node.title || "Cordon Canvas"; }, true);
-  for (const b of [minBtn, closeBtn]) {
+  for (const b of [minBtn, closeBtn, detachBtn]) {
     b.addEventListener("pointerdown", (e) => e.stopPropagation());
     b.addEventListener("mousedown", (e) => e.stopPropagation());
   }
   node._cdcDock = dock; node._cdcSig = ""; node._cdcHostEl = null; node._cdcHostId = null;
   cdcLive.add(node);
   const flushDock = () => { try { window.dispatchEvent(new MouseEvent("mouseup")); } catch {} };
+  let followLabel = null;
   function saveDockGeom() {
     if (node.properties.cdc_min) return;
     if (dock.offsetWidth < CDC_DOCK_MINW || dock.offsetHeight < CDC_DOCK_MINH) return; // transient mid-reparent read
-    const g = node.properties.cdc_dockGraph;
-    if (g) { g.w = dock.offsetWidth; g.h = dock.offsetHeight; }
+    const w = dock.offsetWidth, h = dock.offsetHeight;
+    if (node.properties.cdc_detached) {
+      const f = node.properties.cdc_freeGraph;
+      if (f) { f.w = w; f.h = h; }
+    } else {
+      const g = node.properties.cdc_dockGraph;
+      if (g) { g.w = w; g.h = h; }
+    }
   }
   function syncMin() {
     dock.classList.toggle("min", !!node.properties.cdc_min);
@@ -877,26 +1130,56 @@ function setupNode(node) {
     if (!node.properties.cdc_min) requestAnimationFrame(draw);
   }
   function syncLock() {
-    dock.classList.toggle("locked", !!(node.flags && node.flags.pinned));
+    dock.classList.toggle("locked", !!(node.flags && node.flags.pinned) && !node.properties.cdc_detached);
+  }
+  function syncDetachBtn() {
+    const on = !!node.properties.cdc_detached;
+    detachBtn.textContent = on ? "Dock" : "Undock";
+    detachBtn.title = on ? "Dock editor to the right edge of the node" : "Undock editor to move it freely (snaps to node edges, stays detached)";
+    detachBtn.classList.toggle("active", on);
+    try { dock.classList.toggle("docked", !on); } catch {}
+    if (followLabel) followLabel.textContent = on ? "editor undocked — drag to move, snaps to edges" : "editor docked at right";
+  }
+  function setDetached(detached, persist) {
+    const want = !!detached;
+    if (want === !!node.properties.cdc_detached) { syncDetachBtn(); return; }
+    if (want) {
+      const abs = cdcReadAbs(node);
+      node.properties.cdc_detached = true;
+      node.properties.cdc_freeGraph = { x: abs.x, y: abs.y, w: abs.w, h: abs.h };
+    } else {
+      const abs = cdcReadAbs(node);
+      node.properties.cdc_detached = false;
+      // Re-dock (button only): attach to the right edge of the main node, keeping the current size.
+      const sl = cdcDockXY(node);
+      node.properties.cdc_dockGraph = { x: sl.x, y: sl.y, w: abs.w, h: abs.h };
+      n_CdcSigReset(); cdcPlace(node);
+    }
+    syncDetachBtn(); syncLock();
+    n_CdcSigReset(); cdcPlace(node); cdcWake();
+    if (persist) flushDock();
   }
   function n_CdcSigReset() { node._cdcSig = ""; node._cdcHostEl = null; node._cdcHostId = null; }
   function startDockResize(e, dir) {
-    if (e.button !== 0 || node.flags?.pinned) return;
+    if (e.button !== 0) return;
+    if (node.flags?.pinned && !node.properties.cdc_detached) return;
+    // Docked is attached to the node right edge: no top/left resize (that would move it).
+    if (!node.properties.cdc_detached && (dir.includes('n') || dir.includes('w'))) return;
     e.preventDefault(); e.stopPropagation();
     const scale = app.canvas ? (app.canvas.ds.scale || 1) : 1;
-    const sx = e.clientX, sy = e.clientY, w0 = dock.offsetWidth, h0 = dock.offsetHeight;
-    const g0 = (node.properties.cdc_dockGraph ??= { x: 0, y: (node.size?.[1] ?? 120) + 6, w: 440, h: 560 });
-    const gx0 = g0.x, gy0 = g0.y;
+    const sx = e.clientX, sy = e.clientY;
+    const a0 = cdcReadAbs(node);
     cdcDrag(e, e.currentTarget, (me) => {
       const dx = (me.clientX - sx) / scale, dy = (me.clientY - sy) / scale;
-      let w = w0, h = h0, gx = gx0, gy = gy0;
-      if (dir.includes("e")) w = w0 + dx;
-      if (dir.includes("s")) h = h0 + dy;
-      if (dir.includes("w")) { w = w0 - dx; gx = gx0 + dx; }
-      if (dir.includes("n")) { h = h0 - dy; gy = gy0 + dy; }
-      if (w < CDC_DOCK_MINW) { if (dir.includes("w")) gx -= (CDC_DOCK_MINW - w); w = CDC_DOCK_MINW; }
-      if (h < CDC_DOCK_MINH) { if (dir.includes("n")) gy -= (CDC_DOCK_MINH - h); h = CDC_DOCK_MINH; }
-      g0.x = gx; g0.y = gy; g0.w = Math.round(w); g0.h = Math.round(h); n_CdcSigReset(); cdcPlace(node);
+      let x = a0.x, y = a0.y, w = a0.w, h = a0.h;
+      if (dir.includes("e")) w = a0.w + dx;
+      if (dir.includes("s")) h = a0.h + dy;
+      if (dir.includes("w")) { w = a0.w - dx; x = a0.x + dx; }
+      if (dir.includes("n")) { h = a0.h - dy; y = a0.y + dy; }
+      if (w < CDC_DOCK_MINW) { if (dir.includes("w")) x -= (CDC_DOCK_MINW - w); w = CDC_DOCK_MINW; }
+      if (h < CDC_DOCK_MINH) { if (dir.includes("n")) y -= (CDC_DOCK_MINH - h); h = CDC_DOCK_MINH; }
+      cdcWriteAbs(node, { x, y, w, h });
+      n_CdcSigReset(); cdcPlace(node);
       draw();
     }, () => { saveDockGeom(); flushDock(); });
   }
@@ -909,48 +1192,197 @@ function setupNode(node) {
     if (persist) flushDock();
   }
   closeBtn.addEventListener("click", () => setOpen(false, true));
+  detachBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    setDetached(!node.properties.cdc_detached, true);
+  });
   head.addEventListener("pointerdown", (e) => {
-    if (e.target === minBtn || e.target === closeBtn || e.button !== 0) return;
-    if (node.flags?.pinned) return; // node pinned → dock locked
+    if (e.button !== 0) return;
+    if (e.target instanceof Element && e.target.closest(".cdc-btn")) return;
+    // Docked = attached to the right edge of the main node: the header does not move it.
+    // Press Undock, then drag freely; dropping near a node edge only snaps flush (stays detached).
+    if (!node.properties.cdc_detached) return;
+    if (node.flags?.pinned && !node.properties.cdc_detached) return; // pinned node locks a docked panel only
     e.preventDefault();
     const sx0 = e.clientX, sy0 = e.clientY;
-    const scale = app.canvas?.ds.scale || 1;
-    const g0 = (node.properties.cdc_dockGraph ??= { x: 0, y: (node.size?.[1] ?? 120) + 6, w: 440, h: 560 });
-    const gx0 = g0.x, gy0 = g0.y;
-    const gw = g0.w, gh = g0.h;
-    let snap = false;
+    const scale = app.canvas?.ds?.scale || 1;
+    const a0 = cdcReadAbs(node);
+    let lastHit = null;
     cdcDrag(e, head, (me) => {
-      let gx = gx0 + (me.clientX - sx0) / scale, gy = gy0 + (me.clientY - sy0) / scale;
-      // Snap flush to any node edge, in place: only the perpendicular axis is pulled in,
-      // so the dock stays where it was put along the edge. Corners snap on both axes.
-      const nw = node.size?.[0] ?? 0, nh = node.size?.[1] ?? 120;
-      const gap = 6, tol = 26 / scale;
-      snap = false;
-      if (Math.abs(gy - (nh + gap)) < tol) { gy = nh + gap; snap = true; } // below
-      if (Math.abs(gy + gh + gap) < tol) { gy = -gap - gh; snap = true; } // above
-      if (Math.abs(gx - (nw + gap)) < tol) { gx = nw + gap; snap = true; } // right
-      if (Math.abs(gx + gw + gap) < tol) { gx = -gap - gw; snap = true; } // left
-      dock.classList.toggle("snap", snap);
-      g0.x = gx; g0.y = gy;
-      n_CdcSigReset(); cdcPlace(node);
+      const abs = {
+        x: a0.x + (me.clientX - sx0) / scale,
+        y: a0.y + (me.clientY - sy0) / scale,
+        w: a0.w, h: a0.h,
+      };
+      const hit = cdcNearestEdge(node, abs, scale, cdcClientToGraph(me.clientX, me.clientY));
+      lastHit = hit;
+      const shown = hit ? hit.rect : abs;
+      cdcSetSnapClass(dock, hit?.edge || null);
+      if (node.properties.cdc_detached) {
+        node.properties.cdc_freeGraph = { x: shown.x, y: shown.y, w: shown.w, h: shown.h };
+        n_CdcSigReset(); cdcPlace(node);
+      } else {
+        cdcWriteAbs(node, shown, { detached: false });
+        n_CdcSigReset(); cdcPlace(node);
+      }
     }, () => {
-      dock.classList.remove("snap");
+      cdcSetSnapClass(dock, null);
+      // Snap, don't re-dock: a snapped drop only parks the panel flush with the edge (stays detached).
+      // Only the Dock button re-docks.
+      const src = (node.properties.cdc_detached && lastHit) ? lastHit.rect : cdcReadAbs(node);
+      cdcWriteAbs(node, {
+        x: Math.round(src.x), y: Math.round(src.y),
+        w: Math.round(src.w), h: Math.round(src.h),
+      });
       saveDockGeom(); flushDock();
+      n_CdcSigReset(); cdcPlace(node);
     });
   });
   window.addEventListener("resize", cdcWake);
 
+  // ---- title-bar help badge: "?" drawn top-right of the node title bar (LiteGraph
+  // extension badge slot). Hovering (or clicking) it shows the full editor instructions
+  // in a floating panel — never clipped by the node or viewport.
+  const HELP_TEXT = [
+    "drag: new/move/resize · Shift/Ctrl+drag: new over others",
+    "Alt+click: cycle · Del/right-click: remove · Esc: deselect",
+    "Fit: letterbox layout to current size · Stretch: X/Y to current · Revert: undo",
+    "wheel: zoom · middle/Space+drag: pan · dbl-click empty: view fit",
+  ].join("\n");
+  let helpTip = node._cdcHelpTip;
+  if (!helpTip || !helpTip.isConnected) {
+    helpTip = el("div", {}, {
+      position: "fixed", display: "none", zIndex: 9999, pointerEvents: "none",
+      background: "#1b1b1b", color: "#ddd", border: "1px solid #555", borderRadius: "8px",
+      padding: "8px 10px", font: "12px/1.5 sans-serif", whiteSpace: "pre-wrap", maxWidth: "320px",
+      boxShadow: "0 8px 30px rgba(0,0,0,0.55)",
+    });
+    helpTip.textContent = HELP_TEXT;
+    document.body.appendChild(helpTip);
+    node._cdcHelpTip = helpTip;
+  }
+  let helpPinUntil = 0;
+  function helpTipScreen() {
+    // node-relative badge rect -> screen px (for the floating instructions panel)
+    try {
+      const c = app.canvas;
+      if (!c?.canvas || !c.ds || !node.pos) return null;
+      const scale = c.ds.scale || 1, off = c.ds.offset || [0, 0];
+      const r = c.canvas.getBoundingClientRect();
+      const b = helpBadge.boundingRect;
+      return {
+        x: r.left + (node.pos[0] + b[0] + off[0]) * scale,
+        y: r.top + (node.pos[1] + b[1] + off[1]) * scale,
+        s: scale,
+      };
+    } catch { return null; }
+  }
+  function showHelpTip(pinMs) {
+    if (pinMs) helpPinUntil = Date.now() + pinMs;
+    const p = helpTipScreen();
+    if (!p) return;
+    helpTip.style.display = "block";
+    helpTip.style.left = "0px"; helpTip.style.top = "0px";
+    const W = helpTip.offsetWidth || 280, H = helpTip.offsetHeight || 120;
+    let L = Math.round(p.x - W + 18 * p.s), T = Math.round(p.y + 18 * p.s + 6);
+    L = Math.max(8, Math.min(L, window.innerWidth - W - 8));
+    if (T + H > window.innerHeight - 8) T = Math.round(p.y - H - 6);
+    T = Math.max(8, T);
+    helpTip.style.left = L + "px"; helpTip.style.top = T + "px";
+  }
+  function hideHelpTip() { helpTip.style.display = "none"; }
+  const helpBadge = {
+    __cdcHelp: true, text: "?", height: 16,
+    boundingRect: [0, 0, 0, 0],
+    getWidth: () => 18,
+    draw(ctx, x, y) {
+      const w = 18, h = 16;
+      this.boundingRect[0] = x; this.boundingRect[1] = y;
+      this.boundingRect[2] = w; this.boundingRect[3] = h;
+      ctx.save();
+      ctx.beginPath(); ctx.arc(x + w / 2, y + h / 2, 7.5, 0, Math.PI * 2);
+      ctx.fillStyle = node._cdcHelpHover ? "#3d3d3d" : "#2a2a2a"; ctx.fill();
+      ctx.strokeStyle = node._cdcHelpHover ? "#cfcfcf" : "#888"; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = "#fc3"; ctx.font = "bold 11px sans-serif";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("?", x + w / 2, y + h / 2 + 0.5);
+      ctx.restore();
+    },
+    onClick: () => { showHelpTip(6000); }, // pinned 6s (touch / click users)
+  };
+  node.badges ??= [];
+  const hasHelpBadge = node.badges.some((b) => {
+    try { return (typeof b === "function" ? b() : b)?.__cdcHelp === true; } catch { return false; }
+  });
+  if (!hasHelpBadge) node.badges.push(() => helpBadge);
+  cdcChain(node, "onMouseMove", (e, pos) => {
+    const b = helpBadge.boundingRect;
+    const inside = !!pos && pos[0] >= b[0] && pos[0] <= b[0] + b[2] && pos[1] >= b[1] && pos[1] <= b[1] + b[2] + 8;
+    if (inside !== !!node._cdcHelpHover) {
+      node._cdcHelpHover = inside;
+      if (inside) showHelpTip(0);
+      else if (Date.now() > helpPinUntil) hideHelpTip();
+      node.setDirtyCanvas?.(true, false);
+    } else if (inside) {
+      showHelpTip(0); // keep the panel glued to the badge while the node sits still
+    }
+  });
+  cdcChain(node, "onMouseDown", () => { hideHelpTip(); helpPinUntil = 0; });
+
+  // ---- node-body property panel: independent DOM widget directly above the Hide-editor row ----
+  // Holds per-box controls (type/text/desc/colour/palette) + prompt controls (preset/focus/cams/batch-lat).
+  // Lives on the main node (vertical layout), not inside the dock editor window.
+  // Fixed dark-grey box (matches the canvas dock theme) with a fixed size: node resizes
+  // never reflow, shift, or spill these controls outside the node.
+  const propsWrap = el("div", { className: "cdc-props" }, {
+    display: "flex", flexDirection: "column", gap: "4px", width: "100%", minWidth: 0, maxWidth: "100%",
+    boxSizing: "border-box", overflow: "hidden", background: "#1b1b1b", color: "#ddd",
+    border: "1px solid #555", borderRadius: "8px", padding: "6px 6px 8px",
+    font: "12px sans-serif",
+  });
+  propsWrap.append(panel, genDiv);
+  // panel/genDiv were built with dock flex styles; reset for node-body stacking.
+  for (const pn of [panel, genDiv]) {
+    pn.style.flex = "0 0 auto";
+    pn.style.width = "100%";
+    pn.style.minWidth = "0";
+    pn.style.maxWidth = "100%";
+  }
+  propsWrap.style.paddingBottom = "10px";
+  const propsDom = node.addDOMWidget("cordon_props", "cordon_props", propsWrap, {
+    serialize: false, hideOnZoom: false, getMinHeight: () => 360,
+  });
+  // Fixed size, never content-measured: node resizes can't reflow or shift these controls.
+  // Width 720 = 2.25x the 320 starting width; LiteGraph clamps manual resize to
+  // computeSize(), so this is also the minimum main-node width.
+  propsDom.computeSize = () => [720, 384];
+  try {
+    const pel = propsDom.element || propsWrap.parentElement;
+    if (pel) Object.assign(pel.style, { overflow: "visible" });
+  } catch {}
+
   const openBtn = btn("Hide editor", () => setOpen(dock.style.display === "none", true));
   openBtn.title = "Show or hide the bounding-box editor window";
-  const stub = el("div", {}, { display: "flex", gap: "6px", alignItems: "center", width: "100%" });
-  stub.append(openBtn, el("span", { textContent: "editor follows the node" }, { opacity: 0.65, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }));
+  openBtn.style.whiteSpace = "nowrap"; openBtn.style.flex = "0 0 auto";
+  // Slim control row directly below the props panel — vertical layout space, with bottom
+  // padding on the props panel above so the footer guide text below is never clipped.
+  const stub = el("div", {}, {
+    display: "flex", gap: "6px", alignItems: "center", width: "100%",
+    height: "28px", maxHeight: "28px", overflow: "hidden", boxSizing: "border-box",
+  });
+  followLabel = el("span", { textContent: "editor docked at right" }, { opacity: 0.65, fontSize: "11px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" });
+  stub.append(openBtn, followLabel);
   const dom = node.addDOMWidget("cordon_editor", "cordon_canvas", stub, {
     serialize: false, hideOnZoom: false, getMinHeight: () => 28,
   });
   dom.computeSize = () => [280, 32];
+  try {
+    const wel = dom.element || stub.parentElement;
+    if (wel) Object.assign(wel.style, { height: "32px", minHeight: "32px", maxHeight: "32px", overflow: "hidden" });
+  } catch {}
 
   document.body.appendChild(dock);
-  syncMin(); syncLock();
+  syncMin(); syncLock(); syncDetachBtn();
   cdcInstallWakes(); cdcPlace(node); cdcWake();
   dock.style.display = node.properties.cdc_open !== false ? "" : "none";
   try { openBtn.textContent = node.properties.cdc_open !== false ? "Hide editor" : "Show editor"; } catch {}
@@ -970,26 +1402,14 @@ function setupNode(node) {
     try { window.removeEventListener("resize", cdcWake); } catch {}
     cdcLive.delete(node);
     try { dock.remove(); } catch {}
+    try { node._cdcHelpTip?.remove(); } catch {}
+    try { node._cdcHelpTip = null; } catch {}
     IMG_LISTENERS.delete(onImg);
     return onRemoved?.apply(this, arguments);
   };
 
   // ---------- width/height reactivity ----------
-  // widthW/heightW are captured at creation; the live widgets are re-looked-up on every
-  // resolve so the live view keeps working even if the frontend recreates widget objects
-  // (reload, widget<->input conversion).
-  const curWidthW = () => node.widgets?.find((w) => w.name === "width") ?? widthW;
-  const curHeightW = () => node.widgets?.find((w) => w.name === "height") ?? heightW;
-  const curDataW = () => node.widgets?.find((w) => w.name === "box_data") ?? dataW;
-  const curLastW = () => node.widgets?.find((w) => w.name === "last_incoming") ?? lastW;
-  const curBatchW = () => node.widgets?.find((w) => w.name === "batch_size") ?? batchW;
-  const curLatentW = () => node.widgets?.find((w) => w.name === "latent_type") ?? latentW;
-  const curPresetW = () => node.widgets?.find((w) => w.name === "style_preset") ?? presetW;
-  const curFocusW = () => node.widgets?.find((w) => w.name === "photo_focus") ?? focusW;
-  const curCamPosW = () => node.widgets?.find((w) => w.name === "cam_pos") ?? camPosW;
-  const curCamLocW = () => node.widgets?.find((w) => w.name === "cam_loc") ?? camLocW;
-  const curCamAngleW = () => node.widgets?.find((w) => w.name === "cam_angle") ?? camAngleW;
-  const curBypassW = () => node.widgets?.find((w) => w.name === "bypass_boxes") ?? bypassW;
+  // cur*W helpers are declared near the top of setupNode (before baseHint/latentDs).
   function findDesc(obj, key) {
     for (let o = obj; o; o = Object.getPrototypeOf(o)) { const d = Object.getOwnPropertyDescriptor(o, key); if (d) return d; }
     return null;
@@ -1190,7 +1610,7 @@ function setupNode(node) {
     node.properties.cdc_open ??= true;
     try {
       cdcInstallWakes();
-      n_CdcSigReset(); syncMin(); syncLock();
+      n_CdcSigReset(); syncMin(); syncLock(); syncDetachBtn();
       cdcPlace(node); cdcWake();
       dock.style.display = node.properties.cdc_open !== false ? "" : "none";
       try { openBtn.textContent = node.properties.cdc_open !== false ? "Hide editor" : "Show editor"; } catch {}

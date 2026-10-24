@@ -20,11 +20,12 @@ Restart ComfyUI. Uses the classic (LiteGraph) frontend.
 **Cordon Inject Noise** — tops up noise at a two-pass sigma handoff.
 
 ## Editor controls
-- **Fit / Stretch / Revert** (toolbar): changing width/height does **not** move boxes by itself (they stay in the previous pixel space). **Fit** remaps from that pre-change size with a uniform letterboxed scale (centred, like the background overlay); **Stretch** scales X and Y independently onto the new canvas; **Revert** undoes the last Fit/Stretch (one level).
+- **Fit / Stretch / Revert** (toolbar): width/height changes do **not** move boxes alone. **Fit** uniformly letterboxes the box layout into the **current** canvas (centred; fills the limiting axis). **Stretch** maps authored coords with independent X/Y scales onto the **current** size (`x·W/Ws`, `y·H/Hs`). **Revert** undoes the last Fit/Stretch (one level).
 - Drag empty: new box · drag box: move · handles: resize · Shift/Ctrl+drag: new box over others
 - Alt+click: cycle overlapping · Del/right-click: remove · Esc: deselect
 - ⊘ boxes (end of toolbar): bypass all boxes → `moss_layout`/`layout_1000` become caption-only plain text (short medium lead; boxes kept in the editor, shown dimmed)
 - Wheel: zoom (to 16×) · middle-drag or Space+drag: pan · double-click empty: fit · Ctrl+wheel: graph zoom
+- **Detach** (dock header): the editor stays in graph space (pans and zooms with the canvas) but no longer follows the node. Drag the header; near one node edge it snaps flush at the pointer (highlight on that side) and docks again. Not screen-pinned.
 
 ## Style presets & camera
 Presets (default **photo**): `none`, `photo`, `film`, `cinematic`, `studio product`, `editorial`, `anime`, `illustration`, `watercolor`, `oil painting`, `3d render`, `pixel art`, `poster`, `comic`, `sketch`. Each contributes **one** `summary.meta` tag on boxed layouts; plain / bypass opens with a short medium lead (e.g. "A photograph."). Legacy names map to the nearest current preset.
